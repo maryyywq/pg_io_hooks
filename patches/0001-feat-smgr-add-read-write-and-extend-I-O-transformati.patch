@@ -1,0 +1,150 @@
+From 49e8491870ef2b2b956bb482519f67ec30feb17d Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:17:55 +0700
+Subject: [PATCH 1/5] feat(smgr): add read, write and extend I/O transformation
+ hooks
+
+Add smgr_read_hook, smgr_write_hook and smgr_extend_hook, called from
+smgrreadv(), smgrwritev() and smgrextend().  An extension can use them
+to transform block data on its way to and from the storage manager, for
+example to implement transparent page encryption.
+
+The hooks follow the usual chaining convention.  Page checksums are
+computed before the write hook and verified after the read hook, so
+hooks always see the plaintext page.  With no hook registered the
+behavior is unchanged.
+---
+ src/backend/storage/smgr/smgr.c | 17 +++++++++
+ src/include/storage/smgr.h      | 65 +++++++++++++++++++++++++++++++++
+ 2 files changed, 82 insertions(+)
+
+diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
+index 1344316ee2c..1a745fbe274 100644
+--- a/src/backend/storage/smgr/smgr.c
++++ b/src/backend/storage/smgr/smgr.c
+@@ -137,6 +137,11 @@ static HTAB *SMgrRelationHash = NULL;
+ 
+ static dlist_head unpinned_relns;
+ 
++/* Storage I/O transformation hooks, see smgr.h */
++smgr_read_hook_type smgr_read_hook = NULL;
++smgr_write_hook_type smgr_write_hook = NULL;
++smgr_extend_hook_type smgr_extend_hook = NULL;
++
+ /* local function prototypes */
+ static void smgrshutdown(int code, Datum arg);
+ static void smgrdestroy(SMgrRelation reln);
+@@ -535,6 +540,10 @@ void
+ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ 		   const void *buffer, bool skipFsync)
+ {
++	/* Let an extension transform the block (e.g. encrypt it) */
++	if (smgr_extend_hook)
++		buffer = smgr_extend_hook(reln, forknum, blocknum, buffer);
++
+ 	smgrsw[reln->smgr_which].smgr_extend(reln, forknum, blocknum,
+ 										 buffer, skipFsync);
+ 
+@@ -602,6 +611,10 @@ smgrreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ {
+ 	smgrsw[reln->smgr_which].smgr_readv(reln, forknum, blocknum, buffers,
+ 										nblocks);
++
++	/* Let an extension transform the blocks (e.g. decrypt them) */
++	if (smgr_read_hook)
++		smgr_read_hook(reln, forknum, blocknum, buffers, nblocks);
+ }
+ 
+ /*
+@@ -631,6 +644,10 @@ void
+ smgrwritev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ 		   const void **buffers, BlockNumber nblocks, bool skipFsync)
+ {
++	/* Let an extension transform the blocks (e.g. encrypt them) */
++	if (smgr_write_hook)
++		buffers = smgr_write_hook(reln, forknum, blocknum, buffers, nblocks);
++
+ 	smgrsw[reln->smgr_which].smgr_writev(reln, forknum, blocknum,
+ 										 buffers, nblocks, skipFsync);
+ }
+diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
+index 3856d1d4f8b..7e692ffb2b9 100644
+--- a/src/include/storage/smgr.h
++++ b/src/include/storage/smgr.h
+@@ -73,6 +73,71 @@ typedef SMgrRelationData *SMgrRelation;
+ #define SmgrIsTemp(smgr) \
+ 	RelFileLocatorBackendIsTemp((smgr)->smgr_rlocator)
+ 
++/*
++ * Storage I/O transformation hooks.
++ *
++ * These hooks let an extension (loaded via shared_preload_libraries) observe
++ * or transform block data on its way to and from the storage manager, for
++ * example to implement transparent page encryption.  Each hook is optional;
++ * when it is NULL, the behavior is identical to a server without hooks.
++ *
++ * Hooks are called from any process that performs relation I/O: backends,
++ * the background writer, the checkpointer and the startup process.
++ *
++ * Registration follows the usual PostgreSQL convention: an extension saves
++ * the previous value of the hook variable in _PG_init() and calls it from its
++ * own hook.  Only one extension may actually change data.  Any other hook
++ * must be a pass-through: it calls the previous hook, may observe the data,
++ * and returns what the previous hook returned.
++ *
++ * Checksums are not the hooks' concern.  The core computes a page checksum
++ * before the write hook runs and verifies it after the read hook has run, so
++ * both always see the untransformed (plaintext) page image.
++ *
++ * Errors must be reported with ereport(ERROR).  A hook must not modify the
++ * buffers passed to the write and extend hooks, because they may be shared
++ * buffers.
++ */
++
++/*
++ * smgr_read_hook_type: called after smgrreadv() has read "nblocks" blocks
++ * starting at "blocknum" into "buffers", before the caller looks at them.
++ * The hook may transform the blocks in place (e.g. decrypt them).
++ */
++typedef void (*smgr_read_hook_type) (SMgrRelation reln, ForkNumber forknum,
++									 BlockNumber blocknum,
++									 void **buffers, BlockNumber nblocks);
++
++/*
++ * smgr_write_hook_type: called by smgrwritev() before the blocks are written.
++ * Returns the array of buffers that must actually be written.  The hook must
++ * return the input array unchanged if it does not transform the data.
++ *
++ * Otherwise, the returned array and the buffers it points to are owned by the
++ * hook, must be aligned to PG_IO_ALIGN_SIZE, and must stay valid until the
++ * next call of any smgr write hook in the same process.  The hook must be
++ * prepared for up to MAX_IO_COMBINE_LIMIT blocks per call.  Memory should be
++ * allocated in advance (e.g. in _PG_init()) rather than in the hook.
++ */
++typedef const void **(*smgr_write_hook_type) (SMgrRelation reln,
++											  ForkNumber forknum,
++											  BlockNumber blocknum,
++											  const void **buffers,
++											  BlockNumber nblocks);
++
++/*
++ * smgr_extend_hook_type: the single-block counterpart of the write hook,
++ * called by smgrextend().  The same rules for the returned buffer apply.
++ */
++typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
++											  ForkNumber forknum,
++											  BlockNumber blocknum,
++											  const void *buffer);
++
++extern PGDLLIMPORT smgr_read_hook_type smgr_read_hook;
++extern PGDLLIMPORT smgr_write_hook_type smgr_write_hook;
++extern PGDLLIMPORT smgr_extend_hook_type smgr_extend_hook;
++
+ extern void smgrinit(void);
+ extern SMgrRelation smgropen(RelFileLocator rlocator, ProcNumber backend);
+ extern bool smgrexists(SMgrRelation reln, ForkNumber forknum);
+
+base-commit: 179f22f256ab50bdd0a4351a8b9def13876e4c43
+-- 
+2.53.0
+
