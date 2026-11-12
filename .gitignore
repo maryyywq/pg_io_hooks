@@ -1,0 +1,13 @@
+# Task specification (private, not part of the repository)
+Техническое задание.docx
+
+# Local tooling
+.claude/
+
+# Windows metadata
+*:Zone.Identifier
+
+# Build artifacts
+*.o
+*.so
+*.log
