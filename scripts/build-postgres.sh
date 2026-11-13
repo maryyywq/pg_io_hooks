@@ -42,6 +42,11 @@ fi
 
 echo "==> PostgreSQL base commit: $BASE"
 
+# A checksum of the patch files, stored in the source tree after they are
+# applied, so that a later run notices when the patches have changed.
+PATCHES_SUM="$(cat "$ROOT"/patches/*.patch | sha256sum | cut -d' ' -f1)"
+STAMP="$SRC/.pg_io_hooks-patches.sha256"
+
 if [ ! -d "$SRC/.git" ]; then
     echo "==> Fetching PostgreSQL source from $PG_REPO"
     mkdir -p "$SRC"
@@ -55,10 +60,12 @@ if [ ! -d "$SRC/.git" ]; then
     # throw-away source tree; the patches keep their own authors.
     git -C "$SRC" -c user.name="pg_io_hooks build" -c user.email="build@localhost" \
         am --quiet "$ROOT"/patches/*.patch
+    echo "$PATCHES_SUM" > "$STAMP"
 else
     echo "==> Reusing the source tree in $SRC"
-    if ! grep -q smgr_read_hook "$SRC/src/include/storage/smgr.h"; then
-        echo "error: $SRC exists but does not contain the patches; remove $WORKDIR and run again" >&2
+    if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$PATCHES_SUM" ]; then
+        echo "error: the source tree in $SRC was not prepared from the current patches;" >&2
+        echo "       remove $WORKDIR and run this script again" >&2
         exit 1
     fi
 fi
