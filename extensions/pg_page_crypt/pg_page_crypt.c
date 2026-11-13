@@ -260,8 +260,11 @@ load_key(unsigned char *key)
 				 errmsg("pg_page_crypt: key file \"%s\" must contain %d hexadecimal characters (two different 256-bit keys)",
 						key_file, 2 * PAGE_CIPHER_KEY_LEN)));
 
-	/* Do not leave the key text lying around on the stack. */
-	memset(buf, 0, sizeof(buf));
+	/*
+	 * Do not leave the key text lying around on the stack.  explicit_bzero,
+	 * unlike memset, is not removed by the optimizer.
+	 */
+	explicit_bzero(buf, sizeof(buf));
 }
 
 /*
@@ -363,7 +366,8 @@ _PG_init(void)
 	if (!page_cipher_init(&cipher, key))
 		ereport(ERROR,
 				(errmsg("pg_page_crypt: could not initialize the cipher")));
-	memset(key, 0, sizeof(key));
+	/* The cipher contexts hold their own copy of the key. */
+	explicit_bzero(key, sizeof(key));
 
 	/* Install the hooks, remembering the previous ones to chain to them. */
 	prev_read_hook = smgr_read_hook;
