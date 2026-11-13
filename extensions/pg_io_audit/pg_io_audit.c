@@ -177,9 +177,12 @@ audit_reset_state(AuditState *state)
 
 /*
  * shmem_startup_hook: create (or attach to) the shared structure.  The
- * postmaster runs this once at startup; "found" tells whether it already
- * existed, which happens when the server restarts after a crash.  A freshly
- * created structure is initialized; an existing one keeps its contents.
+ * postmaster runs this when it creates shared memory: at startup, and again
+ * after a crash of a server process, when shared memory is created anew (so
+ * the counters start from zero then too).  "found" is true only when the
+ * structure already exists, which happens in builds where every process
+ * attaches to shared memory by itself (EXEC_BACKEND, as on Windows); then
+ * the structure must be left as it is.
  */
 static void
 audit_shmem_startup(void)
@@ -212,9 +215,12 @@ audit_shmem_startup(void)
  *
  * Tracing is best effort.  Each event takes a slot number from the atomic
  * counter trace_head, so concurrent writers get different slots, until the
- * ring wraps around: if the ring is smaller than the number of writers at
- * the same moment, two of them can share a slot, and a reader will then skip
- * the damaged entry rather than return a mixed one.
+ * ring wraps around.  A reader skips a slot that is being written.  If the
+ * ring is so small that a slow writer is still filling a slot when another
+ * writer, one full round later, takes the same slot, the two can interleave
+ * and a reader may then see fields of both events.  A ring that is large
+ * compared with the number of concurrent writers makes this practically
+ * impossible.
  */
 static void
 audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,

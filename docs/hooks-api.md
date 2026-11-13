@@ -174,6 +174,19 @@ typedef void (*smgr_unlink_hook_type) (RelFileLocatorBackend rlocator,
 users of the storage manager are covered: the buffer manager, bulk writes
 (`bulk_write.c`), relation copying, WAL replay.
 
+Some commands create or remove relation files as whole directories, without
+the storage manager, and therefore without the create and unlink hooks:
+
+| Command | Files created without `smgr_create_hook` | Files removed without `smgr_unlink_hook` |
+|---------|------------------------------------------|------------------------------------------|
+| `CREATE DATABASE ... STRATEGY = FILE_COPY` | all files of the new database | |
+| `ALTER DATABASE ... SET TABLESPACE` | all files in the new location | all files in the old location |
+| `DROP DATABASE` | | all files of the database |
+| `DROP TABLESPACE` | | the (empty) tablespace directory |
+
+Data in files copied this way also does not pass through the read and write
+hooks: the bytes are copied as they are on disk.
+
 ## Chaining
 
 Extensions install hooks the usual PostgreSQL way: save the previous value in

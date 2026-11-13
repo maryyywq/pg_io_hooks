@@ -73,8 +73,10 @@ Not covered, because they do not use the storage manager:
   similar, `pg_control`, configuration;
 - tools and server code that read or copy relation files directly:
   `pg_basebackup`, `pg_checksums`, `pg_rewind`, `pg_combinebackup`, and, in
-  the server, `copydir.c` (`CREATE DATABASE ... STRATEGY = FILE_COPY`) and
-  `reinit.c` (resetting unlogged relations after a crash).
+  the server, `copydir.c` (`CREATE DATABASE ... STRATEGY = FILE_COPY`,
+  `ALTER DATABASE ... SET TABLESPACE`), `reinit.c` (resetting unlogged
+  relations after a crash) and the removal of whole directories by
+  `DROP DATABASE` and `DROP TABLESPACE`.
 
 Anything that transforms data must keep these direct users in mind. How
 `pg_page_crypt` does this is described below.

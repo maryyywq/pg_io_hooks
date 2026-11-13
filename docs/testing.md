@@ -27,9 +27,10 @@ own temporary servers, so they do not touch any running server.
 | `pg_io_audit`, `t/001_audit.pl` | 15 | counters, trace, reset and privileges |
 | `pg_page_crypt`, `t/001_crypt.pl` | 32 | conversion in both directions, reading and writing, crash recovery, unlogged relations, `VACUUM FULL`, `CLUSTER`, `REINDEX`, `CREATE DATABASE`, wrong key, missing conversion, refusing clusters without checksums |
 | `pg_page_crypt`, `t/002_replication.pl` | 12 | base backup, standby from the backup, WAL replay through the hooks, standby crash, promotion, start without a key |
+| `pg_page_crypt`, `t/003_tool.pl` | 19 | the conversion tool with a shared catalog rewritten before the conversion, with tablespaces (and another server version's directory in the same location, which must stay untouched), with a data directory path that contains a quote; `ALTER TABLE` / `ALTER DATABASE ... SET TABLESPACE` on encrypted data |
 | `tests/hook_chain`, `t/001_chain.pl` | 22 | `pg_io_audit` and `pg_page_crypt` together, in both load orders |
 
-In total 326 checks. These are the numbers from a run on a fresh clone of the
+In total 345 checks. These are the numbers from a run on a fresh clone of the
 repository, with a debug build (assertions enabled).
 
 ## Where each test lives

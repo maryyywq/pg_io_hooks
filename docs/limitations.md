@@ -12,8 +12,12 @@ noted, deliberate.
   temporary files and `pg_control` are not seen by the hooks. Tools and
   server code that read or copy relation files directly (`pg_basebackup`,
   `pg_checksums`, `pg_rewind`, `pg_combinebackup`, `CREATE DATABASE ...
-  STRATEGY = FILE_COPY`, resetting unlogged relations after a crash) bypass
-  them.
+  STRATEGY = FILE_COPY`, `ALTER DATABASE ... SET TABLESPACE`, resetting
+  unlogged relations after a crash) bypass them.
+- **Whole-database file operations are not reported.** `DROP DATABASE`,
+  `DROP TABLESPACE`, `ALTER DATABASE ... SET TABLESPACE` and `CREATE DATABASE
+  ... STRATEGY = FILE_COPY` create or remove files without calling the create
+  and unlink hooks (see the table in [hooks-api.md](hooks-api.md#where-the-hooks-are-called)).
 - **One transforming extension.** Several extensions can install hooks, but
   only one may change data; the others must pass it through
   ([design.md](design.md#one-transformer-any-number-of-observers)). Nothing
@@ -29,16 +33,29 @@ noted, deliberate.
 - **System catalogs are not encrypted.** Only relation files with a file
   number of 16384 or more are (user relations and TOAST, indexes, sequences,
   materialized views). The files of the catalogs created by `initdb` are not,
-  until a command such as `VACUUM FULL` gives them a new file.
+  until a command such as `VACUUM FULL` gives them a new file, which is then
+  encrypted like any other (the conversion tool handles such files in
+  `base/` and in `global/`).
 - **The WAL is not encrypted.** Full-page images and records contain
   plaintext, as do SLRU files, temporary files and server logs.
 - **No authentication.** XTS does not detect tampering by itself. Corruption
   is noticed only through the page checksum (16 bits), so data checksums are
   required. This is a defense against reading the files, not against changing
   them.
-- **Equal data at the same position gives equal ciphertext** in the forks of
-  one relation (the XTS tweak is the file number and block number, without the
-  fork). This is needed to keep the unlogged-relation reset working.
+- **The encryption is deterministic**, as is usual for disk encryption with
+  XTS: the same data in the same place always gives the same ciphertext.
+  Consequences:
+  - Someone who has two copies of an encrypted file from different moments
+    (for example two backups) can see which 16-byte parts of a block changed
+    between them, though not what they contain.
+  - The place is the relation file number and the block number only, not the
+    fork, the database or the tablespace. Equal blocks at the same position
+    in the forks of one relation, or in relations of different databases
+    that happen to have the same file number, give equal ciphertext. Leaving
+    those out is necessary: the server copies files between forks (the reset
+    of unlogged relations) and between databases and tablespaces
+    (`CREATE DATABASE ... STRATEGY = FILE_COPY`,
+    `ALTER DATABASE ... SET TABLESPACE`) without decrypting them.
 - **Conversion is offline and not crash safe.** The cluster must be shut down
   cleanly; the tool works in place, so take a backup first. An interrupted
   conversion leaves a marker file, and the server refuses to start.
@@ -56,11 +73,17 @@ noted, deliberate.
 
 ## `pg_io_audit`
 
-- Counters live in shared memory and start from zero at each server start.
+- Counters live in shared memory and start from zero at each server start,
+  and again when the server reinitializes after a crash of a server process.
 - Counts are requests seen by the hooks, taken before the file system
   operation, which may still fail.
 - `unlink` counts relations, not forks: the hook is called for every fork
   number whether or not the fork exists.
-- The trace is best effort. With many concurrent writers and a small ring, an
-  entry can be overwritten while it is being read and is then skipped.
+- `create` and `unlink` do not count the files of whole databases that are
+  copied or removed at once (`CREATE DATABASE ... STRATEGY = FILE_COPY`,
+  `ALTER DATABASE ... SET TABLESPACE`, `DROP DATABASE`).
+- The trace is best effort. Entries that are being written when the trace is
+  read are skipped. In the rare case that the ring wraps around while a slow
+  writer is still filling a slot (a ring much smaller than the number of
+  concurrent writers), an entry can contain fields of two events.
 - Only relation files are seen, not the WAL, SLRU or temporary files.

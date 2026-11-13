@@ -60,13 +60,20 @@ operations, oldest first: `seq`, `ts`, `pid`, `op`, `fork`, `tablespace`,
 
 ## Notes and limitations
 
-- Counters live in shared memory and start from zero at every server start.
+- Counters live in shared memory and start from zero at every server start,
+  and after the server reinitializes itself following a crash of a server
+  process.
 - Counts are requests seen by the hooks, taken after the previous hook has
   run; an operation that later fails in the file system is still counted.
 - `unlink` counts relations (it is recorded for the main fork only), because
   the hook is invoked for every fork number whether or not the fork exists.
-- The trace is best effort: with many concurrent writers and a small ring an
-  entry may be overwritten while it is being read, and is then skipped.
+- `create` and `unlink` do not count files of whole databases that are
+  copied or removed at once: `CREATE DATABASE ... STRATEGY = FILE_COPY`,
+  `ALTER DATABASE ... SET TABLESPACE`, `DROP DATABASE`. These commands work
+  on directories without the storage manager.
+- The trace is best effort. Entries that are being written when the trace is
+  read are skipped. If the ring is much smaller than the number of concurrent
+  writers, an entry can, rarely, contain fields of two events.
 - Only operations on relation files are seen. WAL, SLRU files and temporary
   files do not go through the storage manager.
 

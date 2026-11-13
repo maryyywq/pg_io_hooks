@@ -19,7 +19,7 @@ proves with two extensions that they are enough.
 | Patches for PostgreSQL 17 | [`patches/`](patches/) | 8 hooks in the storage manager (157 lines in `smgr.h` and `smgr.c`) and a test module |
 | `pg_page_crypt` | [`extensions/pg_page_crypt/`](extensions/pg_page_crypt/) | Transparent encryption of relation files (AES-256-XTS), with a tool that converts a cluster |
 | `pg_io_audit` | [`extensions/pg_io_audit/`](extensions/pg_io_audit/) | Counts and traces storage I/O operations; shows them in SQL views |
-| Tests | [`tests/`](tests/), `t/` of each extension, the test module in the patches | 326 checks, all run by one script and by CI |
+| Tests | [`tests/`](tests/), `t/` of each extension, the test module in the patches | 345 checks, all run by one script and by CI |
 | Scripts | [`scripts/`](scripts/) | Build PostgreSQL with the patches, run all tests |
 | Documentation | [`docs/`](docs/) | API reference, design rationale, tests, limitations |
 

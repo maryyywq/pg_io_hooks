@@ -65,7 +65,12 @@ is running or was not shut down cleanly.
 ## What is encrypted
 
 - All forks of relations with a file number of 16384 or more: user tables,
-  indexes, sequences, TOAST tables, materialized views.
+  indexes, sequences, TOAST tables, materialized views, and system catalogs
+  that a command such as `VACUUM FULL` has given a new file (shared catalogs
+  in `global/` included).
+- In all tablespaces. The conversion tool processes only this server
+  version's subdirectory of a tablespace location and leaves those of other
+  clusters alone.
 - Blocks that consist only of zeroes are never transformed (that is how new,
   unused pages look on disk).
 
@@ -79,10 +84,16 @@ is running or was not shut down cleanly.
 - **No authentication.** XTS does not detect tampering by itself; corruption is
   noticed only through page checksums, a 16-bit value, which is why data
   checksums are required.
-- **Equal data at the same position gives equal ciphertext** in the forks of
-  one relation, because the XTS tweak is built from the file number and the
-  block number but not the fork. This is needed because the server copies the
-  init fork over the main fork of unlogged relations as plain files.
+- **The encryption is deterministic** (as usual for XTS disk encryption):
+  comparing two copies of a file from different moments shows which 16-byte
+  parts of a block changed. The position used by the cipher is the file
+  number and block number only, without the fork, database or tablespace,
+  so equal blocks at the same position in the forks of one relation, or in
+  relations of different databases with the same file number, give equal
+  ciphertext. This is required because the server copies such files without
+  decrypting them (resetting unlogged relations, `CREATE DATABASE ... STRATEGY
+  = FILE_COPY`, `ALTER DATABASE ... SET TABLESPACE`). See
+  [docs/limitations.md](../../docs/limitations.md).
 - **Tools that read relation files directly** see ciphertext, because the
   page header is encrypted too:
   - `pg_checksums` reports every encrypted block as a checksum failure and
@@ -100,6 +111,12 @@ is running or was not shut down cleanly.
 make installcheck
 ```
 
-runs a TAP test against the installed server and module: conversion in both
-directions, reading and writing, crash recovery, unlogged relations,
-`VACUUM FULL`, `CLUSTER`, `CREATE DATABASE`, wrong key and missing conversion.
+runs the TAP tests against the installed server and module:
+
+- `t/001_crypt.pl`: conversion in both directions, reading and writing,
+  crash recovery, unlogged relations, `VACUUM FULL`, `CLUSTER`,
+  `CREATE DATABASE`, wrong key and missing conversion;
+- `t/002_replication.pl`: base backup, standby, promotion;
+- `t/003_tool.pl`: the conversion tool with tablespaces, with shared catalogs
+  rewritten before the conversion, with a data directory path that contains
+  a quote, and moving encrypted data between tablespaces.
