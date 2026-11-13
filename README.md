@@ -1,7 +1,7 @@
 # pg_io_hooks
 
 Storage I/O transformation hooks for PostgreSQL 17 and prototype
-extensions built on top of them (diploma project).
+extensions built on top of them.
 
 ## Layout
 
