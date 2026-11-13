@@ -1,0 +1,46 @@
+name: CI
+
+# Builds PostgreSQL 17 with the patch series from patches/ and runs all
+# tests: the PostgreSQL regression suite, the hooks test module, both
+# extensions and the test with the two extensions together.
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    name: Build and test (PostgreSQL 17 + hooks)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: scripts/install-deps-debian.sh
+
+      - name: Build PostgreSQL with the patches
+        run: scripts/build-postgres.sh
+
+      - name: Run the tests
+        run: scripts/run-tests.sh
+
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          find build/obj extensions tests \
+            \( -name regression.diffs -o -name regression.out \
+               -o -path '*/tmp_check/log/*' -o -name make.log -o -name configure.log \) \
+            -type f -print0 | xargs -0 -I{} cp --parents {} ci-logs/ || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs
+          path: ci-logs
+          if-no-files-found: ignore
