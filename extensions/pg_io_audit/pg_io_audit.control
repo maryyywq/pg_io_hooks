@@ -1,0 +1,5 @@
+# pg_io_audit extension
+comment = 'Audit of storage I/O operations through smgr hooks'
+default_version = '1.0'
+module_pathname = '$libdir/pg_io_audit'
+relocatable = true
