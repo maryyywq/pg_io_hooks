@@ -11,3 +11,9 @@
 *.o
 *.so
 *.log
+
+# Test artifacts
+tmp_check/
+results/
+regression.diffs
+regression.out
