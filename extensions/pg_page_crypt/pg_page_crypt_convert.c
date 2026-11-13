@@ -4,15 +4,31 @@
  *		Encrypt or decrypt the relation files of a stopped cluster for the
  *		pg_page_crypt extension.
  *
- * The tool processes the same relations the extension does: files of
- * relations with a file number of 16384 or more, in "base" and in the
- * tablespace directories.  All-zero blocks are left alone.  When it
- * finishes it writes (or removes) the state file in PGDATA, which the
- * extension checks at startup.
+ * Why this tool exists: initdb creates a cluster without the extension, so
+ * its files are plaintext, and a plaintext page cannot be told apart from an
+ * encrypted one.  The cluster is therefore converted once, while the server
+ * is stopped.  After that, every page of an encrypted file is ciphertext and
+ * the extension (which checks the state file written here) decrypts it on
+ * the fly.
+ *
+ * What is converted: the same files the extension handles, namely relation
+ * files with a file number of 16384 or more (user relations) in "base" and
+ * in the tablespace directories, all forks and all segments.  All-zero
+ * blocks are left alone.  Other files (system catalogs created by initdb,
+ * WAL, SLRUs, temporary relations) are not touched.
+ *
+ * Safety checks before it starts: it refuses to run if the server is
+ * running, if the cluster was not shut down cleanly (otherwise WAL replay at
+ * the next start would meet pages in the wrong form), if data checksums are
+ * disabled, if the key does not match the one used earlier (for --decrypt),
+ * or if the cluster is already in the requested state.
  *
  * The conversion is done in place and is not crash safe: take a backup
- * first.  If the tool is interrupted, a marker file stays in PGDATA and the
- * server refuses to start.
+ * first.  While it runs, a marker file stays in PGDATA; if the tool is
+ * interrupted, the marker remains and the server refuses to start.
+ *
+ * The tool deliberately uses only standard C, POSIX and OpenSSL (not the
+ * PostgreSQL frontend libraries), so it can be built stand-alone.
  *
  * IDENTIFICATION
  *		extensions/pg_page_crypt/pg_page_crypt_convert.c
@@ -34,6 +50,7 @@
 
 static const char *progname = "pg_page_crypt_convert";
 
+/* Cipher state and run-wide settings and statistics */
 static PageCipher cipher;
 static bool do_encrypt = true;
 static uint64_t files_done = 0;
@@ -55,6 +72,7 @@ usage(void)
 
 static void fatal(const char *fmt,...) __attribute__((format(printf, 1, 2), noreturn));
 
+/* Print an error message and exit with failure. */
 static void
 fatal(const char *fmt,...)
 {
@@ -74,7 +92,10 @@ file_exists(const char *path)
 	return access(path, F_OK) == 0;
 }
 
-/* Read the first line of a file into buf; returns false if it is missing. */
+/*
+ * Read the first line of a file into buf; returns false if the file cannot
+ * be opened.  An empty file gives an empty string.
+ */
 static bool
 read_first_line(const char *path, char *buf, size_t size)
 {
@@ -88,6 +109,10 @@ read_first_line(const char *path, char *buf, size_t size)
 	return true;
 }
 
+/*
+ * Read and parse the key file.  Like the extension, the tool insists that
+ * the file is not accessible to group or others.
+ */
 static void
 load_key(const char *path, unsigned char *key)
 {
@@ -115,7 +140,9 @@ load_key(const char *path, unsigned char *key)
 /*
  * The cluster must have been shut down cleanly (otherwise WAL replay at the
  * next start would meet pages in the wrong form) and must have data
- * checksums.  pg_controldata is used to find out.
+ * checksums.  pg_controldata is used to find out, instead of parsing
+ * pg_control here, because that file's layout depends on the server version.
+ * LC_ALL=C keeps the output in English, so that it can be matched.
  */
 static void
 check_control(const char *pgdata)
@@ -132,6 +159,7 @@ check_control(const char *pgdata)
 		fatal("could not run pg_controldata");
 	while (fgets(line, sizeof(line), p) != NULL)
 	{
+		/* Lines look like "Name:      value"; take the value. */
 		char	   *val = strchr(line, ':');
 
 		if (val == NULL)
@@ -141,6 +169,10 @@ check_control(const char *pgdata)
 			val++;
 		val[strcspn(val, "\n")] = '\0';
 
+		/*
+		 * Exactly "shut down": a cluster that was running ("in production"),
+		 * crashed, or was a standby ("shut down in recovery") is refused.
+		 */
 		if (strncmp(line, "Database cluster state:", 23) == 0)
 			clean = strcmp(val, "shut down") == 0;
 		else if (strncmp(line, "Data page checksum version:", 27) == 0)
@@ -155,8 +187,10 @@ check_control(const char *pgdata)
 }
 
 /*
- * Parse a relation file name: "<relnumber>[_fsm|_vm|_init][.<segno>]".
- * Returns false for any other name (temporary relations, maps, ...).
+ * Parse a relation file name: "<relnumber>[_fsm|_vm|_init][.<segno>]", for
+ * example "16384", "16384_fsm", "16384.1" (the second 1 GB segment).
+ * Returns false for any other name: temporary relations ("t3_16384"),
+ * "pg_filenode.map", "PG_VERSION" and so on.
  */
 static bool
 parse_relfile(const char *name, uint32_t *relnumber, uint32_t *segno)
@@ -173,6 +207,7 @@ parse_relfile(const char *name, uint32_t *relnumber, uint32_t *segno)
 	*relnumber = (uint32_t) v;
 	*segno = 0;
 
+	/* Optional fork suffix; the fork itself does not matter for the cipher. */
 	if (strncmp(end, "_fsm", 4) == 0)
 		end += 4;
 	else if (strncmp(end, "_vm", 3) == 0)
@@ -180,6 +215,7 @@ parse_relfile(const char *name, uint32_t *relnumber, uint32_t *segno)
 	else if (strncmp(end, "_init", 5) == 0)
 		end += 5;
 
+	/* Optional segment number for relations larger than 1 GB. */
 	if (*end == '.')
 	{
 		v = strtoul(end + 1, &end, 10);
@@ -188,6 +224,14 @@ parse_relfile(const char *name, uint32_t *relnumber, uint32_t *segno)
 	return *end == '\0';
 }
 
+/*
+ * Convert one relation file, block by block, in place.
+ *
+ * "segno" is the number of the 1 GB segment this file is, so that the first
+ * block of the file has the block number segno * RELSEG_SIZE within the
+ * relation; that number goes into the tweak, exactly as it does in the
+ * server.
+ */
 static void
 convert_file(const char *path, uint32_t relnumber, uint32_t segno)
 {
@@ -204,12 +248,13 @@ convert_file(const char *path, uint32_t relnumber, uint32_t segno)
 		ssize_t		n = pread(fd, buf, BLCKSZ, off);
 
 		if (n == 0)
-			break;
+			break;				/* end of file */
 		if (n < 0)
 			fatal("could not read \"%s\": %s", path, strerror(errno));
 		if (n != BLCKSZ)
 			fatal("\"%s\" has a partial block at offset %lld", path, (long long) off);
 
+		/* All-zero blocks are never transformed, as in the server. */
 		if (!page_cipher_block_is_zero(buf))
 		{
 			if (!page_cipher_apply(&cipher, do_encrypt, relnumber, blkno, buf, buf))
@@ -221,12 +266,18 @@ convert_file(const char *path, uint32_t relnumber, uint32_t segno)
 		off += BLCKSZ;
 		blkno++;
 	}
+
+	/* Make sure the converted data is on disk before we call it done. */
 	if (fsync(fd) != 0)
 		fatal("could not fsync \"%s\": %s", path, strerror(errno));
 	close(fd);
 	files_done++;
 }
 
+/*
+ * Convert the relation files in one database directory
+ * (base/<dboid> or pg_tblspc/<spcoid>/PG_<version>_<catversion>/<dboid>).
+ */
 static void
 convert_dbdir(const char *dir)
 {
@@ -243,6 +294,8 @@ convert_dbdir(const char *dir)
 
 		if (!parse_relfile(de->d_name, &relnumber, &segno))
 			continue;
+
+		/* Same rule as the extension: skip the initdb-created catalogs. */
 		if (relnumber < PAGE_CIPHER_FIRST_RELNUMBER)
 			continue;
 		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
@@ -251,7 +304,11 @@ convert_dbdir(const char *dir)
 	closedir(d);
 }
 
-/* Visit every subdirectory of "dir" whose name starts with "prefix". */
+/*
+ * Call fn() for every subdirectory of "dir" whose name starts with
+ * "prefix" (an empty prefix matches all).  Symbolic links to directories
+ * count: tablespaces in pg_tblspc are links.
+ */
 static void
 for_each_subdir(const char *dir, const char *prefix, void (*fn) (const char *))
 {
@@ -274,18 +331,25 @@ for_each_subdir(const char *dir, const char *prefix, void (*fn) (const char *))
 	closedir(d);
 }
 
+/* pg_tblspc/<spcoid>/PG_<version>_<catversion>/ contains the database dirs. */
 static void
 convert_tablespace_version_dir(const char *dir)
 {
 	for_each_subdir(dir, "", convert_dbdir);
 }
 
+/* pg_tblspc/<spcoid>/ contains one PG_* directory. */
 static void
 convert_tablespace(const char *dir)
 {
 	for_each_subdir(dir, "PG_", convert_tablespace_version_dir);
 }
 
+/*
+ * Write the state file: "encrypted <fingerprint of the key>".  It is written
+ * to a temporary file, flushed and renamed, so the extension never sees a
+ * half-written file.
+ */
 static void
 write_state_file(const char *path, const char *fp)
 {
@@ -326,6 +390,7 @@ main(int argc, char **argv)
 	char		line[128];
 	FILE	   *f;
 
+	/* ---- Command line ---- */
 	while ((c = getopt_long(argc, argv, "D:k:?", long_options, NULL)) != -1)
 	{
 		switch (c)
@@ -336,8 +401,8 @@ main(int argc, char **argv)
 			case 'k':
 				keyfile = optarg;
 				break;
-			case 1:
-			case 2:
+			case 1:				/* --encrypt */
+			case 2:				/* --decrypt */
 				if (mode != 0)
 					fatal("specify only one of --encrypt and --decrypt");
 				mode = c;
@@ -354,6 +419,7 @@ main(int argc, char **argv)
 	}
 	do_encrypt = (mode == 1);
 
+	/* ---- Checks on the cluster ---- */
 	snprintf(path, sizeof(path), "%s/PG_VERSION", pgdata);
 	if (!read_first_line(path, line, sizeof(line)) || strncmp(line, "17", 2) != 0)
 		fatal("\"%s\" is not a PostgreSQL 17 data directory", pgdata);
@@ -363,6 +429,7 @@ main(int argc, char **argv)
 
 	check_control(pgdata);
 
+	/* ---- Key and conversion state ---- */
 	load_key(keyfile, key);
 	if (!page_cipher_fingerprint(key, fp) || !page_cipher_init(&cipher, key))
 		fatal("could not initialize the cipher");
@@ -375,17 +442,25 @@ main(int argc, char **argv)
 
 	if (do_encrypt)
 	{
+		/* Encrypting twice would turn ciphertext into something else. */
 		if (file_exists(state_path))
 			fatal("the cluster is already encrypted (found \"%s\")", state_path);
 	}
 	else
 	{
+		/* Decrypting needs the very key that was used to encrypt. */
 		if (!read_first_line(state_path, line, sizeof(line)))
 			fatal("the cluster is not encrypted (\"%s\" is missing)", state_path);
 		if (strncmp(line, "encrypted ", 10) != 0 || strncmp(line + 10, fp, PAGE_CIPHER_FP_LEN - 1) != 0)
 			fatal("the key does not match the key this cluster was encrypted with");
 	}
 
+	/*
+	 * ---- Conversion ----
+	 *
+	 * Create the marker first: from here on the cluster is in a mixed state
+	 * until we finish, and the server must not start on it.
+	 */
 	f = fopen(converting_path, "w");
 	if (f == NULL)
 		fatal("could not create \"%s\": %s", converting_path, strerror(errno));
@@ -396,6 +471,12 @@ main(int argc, char **argv)
 	snprintf(path, sizeof(path), "%s/pg_tblspc", pgdata);
 	for_each_subdir(path, "", convert_tablespace);
 
+	/*
+	 * ---- Finish ----
+	 *
+	 * Record the new state first and remove the marker last, so that an
+	 * interruption in between never looks like a finished conversion.
+	 */
 	if (do_encrypt)
 		write_state_file(state_path, fp);
 	else if (unlink(state_path) != 0)

@@ -3,18 +3,26 @@
  * pg_io_audit.c
  *		Audit of storage I/O operations through the smgr hooks.
  *
+ * What it does
+ * ------------
  * The extension counts every operation that goes through the storage manager
- * (read, write, extend, zeroextend, sync, truncate, create, unlink) per
+ * (read, write, extend, zeroextend, sync, truncate, create, unlink), per
  * operation type and fork, and can optionally keep a trace of the most
- * recent operations in a ring buffer.  All data lives in shared memory,
- * because the hooks are called from many processes: backends, the background
- * writer, the checkpointer and the startup process.
+ * recent operations in a ring buffer.  The data is shown by two views,
+ * pg_io_audit_stats and pg_io_audit_trace (see the SQL script).
  *
- * The hooks only observe.  They call the previous hook and return what it
- * returned, so the extension can be combined with one extension that
- * transforms data.
+ * Why shared memory: the hooks are called from many processes (backends, the
+ * background writer, the checkpointer, the startup process), and the numbers
+ * must add up across all of them.  So everything lives in one shared memory
+ * structure, AuditState.  Counters are atomic integers, which makes the hot
+ * path (a hook call) lock-free: it costs a few atomic additions.
  *
- * The extension must be loaded with shared_preload_libraries.
+ * Hooks only observe.  They call the previous hook first and return what it
+ * returned, so the extension can be combined with one module that actually
+ * transforms data (for example pg_page_crypt); see smgr.h for the rules.
+ *
+ * The extension must be loaded with shared_preload_libraries, because shared
+ * memory can only be reserved while the server starts.
  *
  * IDENTIFICATION
  *		extensions/pg_io_audit/pg_io_audit.c
@@ -37,12 +45,14 @@
 
 PG_MODULE_MAGIC;
 
+/* SQL-callable functions, see pg_io_audit--1.0.sql */
 PG_FUNCTION_INFO_V1(pg_io_audit_get_stats);
 PG_FUNCTION_INFO_V1(pg_io_audit_get_trace);
 PG_FUNCTION_INFO_V1(pg_io_audit_reset);
 
 void		_PG_init(void);
 
+/* The operations we count, one per kind of smgr hook call */
 typedef enum AuditOp
 {
 	AUDIT_READ,
@@ -57,11 +67,17 @@ typedef enum AuditOp
 	AUDIT_NUM_OPS
 } AuditOp;
 
+/* Names shown in the views, in the same order as AuditOp */
 static const char *const audit_op_names[AUDIT_NUM_OPS] = {
 	"read", "write", "extend", "zeroextend", "immedsync", "registersync",
 	"truncate", "create", "unlink"
 };
 
+/*
+ * Counters of one operation on one fork.  Both are updated with atomic
+ * additions and read without any lock, so a reader may see the two values
+ * from slightly different moments; that is fine for statistics.
+ */
 typedef struct AuditCounter
 {
 	pg_atomic_uint64 calls;		/* number of calls */
@@ -69,24 +85,32 @@ typedef struct AuditCounter
 } AuditCounter;
 
 /*
- * One slot of the trace ring buffer.  "seq" is zero while the slot is being
- * written and idx + 1 once it holds the event number idx; readers use it to
- * discard slots that were overwritten while they were copying them.
+ * One slot of the trace ring buffer.
+ *
+ * Writers do not take a lock.  To let readers detect a slot that is being
+ * written (or was overwritten while they copied it), "seq" works like a
+ * sequence lock: it is zero while the slot is being filled and idx + 1 once
+ * it holds event number idx.  A reader accepts a slot only if "seq" has the
+ * expected value both before and after copying the fields.
  */
 typedef struct AuditTraceEntry
 {
 	pg_atomic_uint64 seq;
 	TimestampTz ts;
 	int			pid;
-	uint8		op;
-	uint8		fork;
-	Oid			spcOid;
+	uint8		op;				/* an AuditOp */
+	uint8		fork;			/* a ForkNumber */
+	Oid			spcOid;			/* the three parts of the RelFileLocator */
 	Oid			dbOid;
 	Oid			relNumber;
-	BlockNumber block;
-	uint32		nblocks;
+	BlockNumber block;			/* first block involved */
+	uint32		nblocks;		/* number of blocks involved */
 } AuditTraceEntry;
 
+/*
+ * The shared memory structure: the counters, and the trace ring buffer,
+ * which has audit_trace_size slots (zero if tracing is off).
+ */
 typedef struct AuditState
 {
 	pg_atomic_uint64 trace_head;	/* number of events traced so far */
@@ -94,13 +118,14 @@ typedef struct AuditState
 	AuditTraceEntry trace[FLEXIBLE_ARRAY_MEMBER];
 } AuditState;
 
+/* Points to the shared structure once the server has started */
 static AuditState *audit_state = NULL;
 
 /* GUCs */
 static bool audit_enabled = true;
 static int	audit_trace_size = 0;
 
-/* Previous hook values */
+/* Previous hook values, to chain to them */
 static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
 static smgr_read_hook_type prev_read_hook = NULL;
@@ -112,6 +137,7 @@ static smgr_truncate_hook_type prev_truncate_hook = NULL;
 static smgr_create_hook_type prev_create_hook = NULL;
 static smgr_unlink_hook_type prev_unlink_hook = NULL;
 
+/* Size of the shared structure for the configured trace size */
 static Size
 audit_memsize(void)
 {
@@ -119,6 +145,10 @@ audit_memsize(void)
 					mul_size(audit_trace_size, sizeof(AuditTraceEntry)));
 }
 
+/*
+ * shmem_request_hook: tell the server how much shared memory we need.  This
+ * must be done before the server allocates its shared memory.
+ */
 static void
 audit_shmem_request(void)
 {
@@ -128,6 +158,7 @@ audit_shmem_request(void)
 	RequestAddinShmemSpace(audit_memsize());
 }
 
+/* Zero all counters and empty the trace. */
 static void
 audit_reset_state(AuditState *state)
 {
@@ -144,6 +175,12 @@ audit_reset_state(AuditState *state)
 		pg_atomic_write_u64(&state->trace[i].seq, 0);
 }
 
+/*
+ * shmem_startup_hook: create (or attach to) the shared structure.  The
+ * postmaster runs this once at startup; "found" tells whether it already
+ * existed, which happens when the server restarts after a crash.  A freshly
+ * created structure is initialized; an existing one keeps its contents.
+ */
 static void
 audit_shmem_startup(void)
 {
@@ -171,9 +208,13 @@ audit_shmem_startup(void)
 
 /*
  * Record one operation: bump the counters and, if tracing is on, append an
- * entry to the ring buffer.  Tracing is best effort: if the ring is smaller
- * than the number of concurrent writers, a slot can be overwritten while it
- * is being filled, and readers then skip it.
+ * entry to the ring buffer.
+ *
+ * Tracing is best effort.  Each event takes a slot number from the atomic
+ * counter trace_head, so concurrent writers get different slots, until the
+ * ring wraps around: if the ring is smaller than the number of writers at
+ * the same moment, two of them can share a slot, and a reader will then skip
+ * the damaged entry rather than return a mixed one.
  */
 static void
 audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,
@@ -181,6 +222,10 @@ audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,
 {
 	AuditState *state = audit_state;
 
+	/*
+	 * No shared state yet (a process that runs before shared memory is set
+	 * up) or counting switched off.
+	 */
 	if (state == NULL || !audit_enabled)
 		return;
 
@@ -192,6 +237,7 @@ audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,
 		uint64		idx = pg_atomic_fetch_add_u64(&state->trace_head, 1);
 		AuditTraceEntry *e = &state->trace[idx % audit_trace_size];
 
+		/* Mark the slot as being written, then fill it, then publish it. */
 		pg_atomic_write_u64(&e->seq, 0);
 		pg_write_barrier();
 		e->ts = GetCurrentTimestamp();
@@ -207,6 +253,15 @@ audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,
 		pg_atomic_write_u64(&e->seq, idx + 1);
 	}
 }
+
+/*
+ * The hooks below follow one pattern: call the previous hook, record the
+ * operation, and for hooks that return something, return what the previous
+ * hook returned.  Recording happens after the previous hook, so the
+ * counters reflect requests that passed through the whole chain, but they
+ * are counted before the actual file system operation, which may still
+ * fail.
+ */
 
 static void
 audit_read_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
@@ -228,6 +283,8 @@ audit_write_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 
 	audit_event(AUDIT_WRITE, forknum, reln->smgr_rlocator.locator,
 				blocknum, nblocks);
+
+	/* Never change the buffers: we only observe. */
 	return buffers;
 }
 
@@ -254,6 +311,11 @@ audit_zeroextend_hook(SMgrRelation reln, ForkNumber forknum,
 				blocknum, nblocks);
 }
 
+/*
+ * "immediate" distinguishes a sync that happens now (smgrimmedsync) from one
+ * that is queued for the next checkpoint (smgrregistersync).  No block
+ * numbers are involved.
+ */
 static void
 audit_sync_hook(SMgrRelation reln, ForkNumber forknum, bool immediate)
 {
@@ -264,6 +326,11 @@ audit_sync_hook(SMgrRelation reln, ForkNumber forknum, bool immediate)
 				forknum, reln->smgr_rlocator.locator, 0, 0);
 }
 
+/*
+ * Truncation normally runs inside a critical section, where memory must not
+ * be allocated and errors are not allowed.  audit_event() only does atomic
+ * operations on preallocated shared memory, so it is safe here.
+ */
 static void
 audit_truncate_hook(SMgrRelation reln, ForkNumber forknum,
 					BlockNumber old_nblocks, BlockNumber nblocks)
@@ -271,7 +338,10 @@ audit_truncate_hook(SMgrRelation reln, ForkNumber forknum,
 	if (prev_truncate_hook)
 		prev_truncate_hook(reln, forknum, old_nblocks, nblocks);
 
-	/* the number of blocks involved is the number removed */
+	/*
+	 * For a truncate, "block" is the new size and "nblocks" the number of
+	 * blocks removed.
+	 */
 	audit_event(AUDIT_TRUNCATE, forknum, reln->smgr_rlocator.locator,
 				nblocks, old_nblocks > nblocks ? old_nblocks - nblocks : 0);
 }
@@ -300,13 +370,21 @@ audit_unlink_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
 		audit_event(AUDIT_UNLINK, forknum, rlocator.locator, 0, 0);
 }
 
+/*
+ * Module initialization.  It runs in the postmaster while the server starts.
+ */
 void
 _PG_init(void)
 {
+	/* Shared memory can only be reserved at server start. */
 	if (!process_shared_preload_libraries_in_progress)
 		ereport(ERROR,
 				(errmsg("pg_io_audit must be loaded via shared_preload_libraries")));
 
+	/*
+	 * Counting can be switched off with a configuration reload, without a
+	 * restart (the shared memory stays allocated).
+	 */
 	DefineCustomBoolVariable("pg_io_audit.enabled",
 							 "Enables counting of storage I/O operations.",
 							 NULL,
@@ -316,6 +394,10 @@ _PG_init(void)
 							 0,
 							 NULL, NULL, NULL);
 
+	/*
+	 * The size of the trace decides how much shared memory is reserved, so it
+	 * can only be changed with a restart.
+	 */
 	DefineCustomIntVariable("pg_io_audit.trace_size",
 							"Number of recent I/O operations kept in the trace.",
 							"Zero disables the trace.",
@@ -329,11 +411,13 @@ _PG_init(void)
 
 	MarkGUCPrefixReserved("pg_io_audit");
 
+	/* Reserve and initialize shared memory. */
 	prev_shmem_request_hook = shmem_request_hook;
 	shmem_request_hook = audit_shmem_request;
 	prev_shmem_startup_hook = shmem_startup_hook;
 	shmem_startup_hook = audit_shmem_startup;
 
+	/* Install the smgr hooks, remembering the previous ones. */
 	prev_read_hook = smgr_read_hook;
 	smgr_read_hook = audit_read_hook;
 	prev_write_hook = smgr_write_hook;
@@ -352,6 +436,10 @@ _PG_init(void)
 	smgr_unlink_hook = audit_unlink_hook;
 }
 
+/*
+ * The shared state, or an error if the extension is not loaded through
+ * shared_preload_libraries (the SQL objects exist but nothing collects data).
+ */
 static AuditState *
 audit_get_state(void)
 {
@@ -364,7 +452,7 @@ audit_get_state(void)
 
 /*
  * pg_io_audit_get_stats() -- one row per operation and fork that has been
- * seen at least once.
+ * seen at least once.  Backs the view pg_io_audit_stats.
  */
 Datum
 pg_io_audit_get_stats(PG_FUNCTION_ARGS)
@@ -372,6 +460,7 @@ pg_io_audit_get_stats(PG_FUNCTION_ARGS)
 	ReturnSetInfo *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	AuditState *state = audit_get_state();
 
+	/* Set up a tuplestore for the result rows. */
 	InitMaterializedSRF(fcinfo, 0);
 
 	for (int op = 0; op < AUDIT_NUM_OPS; op++)
@@ -382,6 +471,7 @@ pg_io_audit_get_stats(PG_FUNCTION_ARGS)
 			bool		nulls[4] = {false, false, false, false};
 			uint64		calls = pg_atomic_read_u64(&state->counters[op][fork].calls);
 
+			/* Skip combinations that never happened, to keep the view short. */
 			if (calls == 0)
 				continue;
 
@@ -400,7 +490,8 @@ pg_io_audit_get_stats(PG_FUNCTION_ARGS)
 
 /*
  * pg_io_audit_get_trace() -- the most recent traced operations, oldest
- * first.  Entries that were overwritten while being read are skipped.
+ * first.  Backs the view pg_io_audit_trace.  Entries that were overwritten
+ * while being read are skipped.
  */
 Datum
 pg_io_audit_get_trace(PG_FUNCTION_ARGS)
@@ -415,6 +506,10 @@ pg_io_audit_get_trace(PG_FUNCTION_ARGS)
 	if (audit_trace_size == 0)
 		return (Datum) 0;
 
+	/*
+	 * Events are numbered from 0.  The ring holds the last audit_trace_size
+	 * of them, so the oldest one still available is head - size.
+	 */
 	head = pg_atomic_read_u64(&state->trace_head);
 	first = head > (uint64) audit_trace_size ? head - audit_trace_size : 0;
 
@@ -426,6 +521,11 @@ pg_io_audit_get_trace(PG_FUNCTION_ARGS)
 		Datum		values[10];
 		bool		nulls[10] = {false};
 
+		/*
+		 * Read the slot like a sequence lock: check that it holds event idx,
+		 * copy it, and check again that it still does.  Otherwise a writer
+		 * was active in it, and the entry is skipped.
+		 */
 		seq = pg_atomic_read_u64(&slot->seq);
 		if (seq != idx + 1)
 			continue;
@@ -460,7 +560,8 @@ pg_io_audit_get_trace(PG_FUNCTION_ARGS)
 }
 
 /*
- * pg_io_audit_reset() -- zero the counters and empty the trace.
+ * pg_io_audit_reset() -- zero the counters and empty the trace.  Restricted
+ * to superusers: it destroys data that other users (pg_monitor) rely on.
  */
 Datum
 pg_io_audit_reset(PG_FUNCTION_ARGS)
