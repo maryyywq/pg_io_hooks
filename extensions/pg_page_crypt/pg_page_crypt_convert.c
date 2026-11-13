@@ -12,10 +12,11 @@
  * the fly.
  *
  * What is converted: the same files the extension handles, namely relation
- * files with a file number of 16384 or more (user relations) in "base" and
- * in the tablespace directories, all forks and all segments.  All-zero
- * blocks are left alone.  Other files (system catalogs created by initdb,
- * WAL, SLRUs, temporary relations) are not touched.
+ * files with a file number of 16384 or more, all forks and all segments, in
+ * "base", in "global" (shared catalogs get such a number when a command like
+ * VACUUM FULL rewrites them) and in this server version's directory of each
+ * tablespace.  All-zero blocks are left alone.  Other files (system catalogs
+ * created by initdb, WAL, SLRUs, temporary relations) are not touched.
  *
  * Safety checks before it starts: it refuses to run if the server is
  * running, if the cluster was not shut down cleanly (otherwise WAL replay at
@@ -42,6 +43,7 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "page_cipher.h"
@@ -55,6 +57,15 @@ static PageCipher cipher;
 static bool do_encrypt = true;
 static uint64_t files_done = 0;
 static uint64_t blocks_done = 0;
+
+/*
+ * Name of this server version's subdirectory in a tablespace, such as
+ * "PG_17_202406281".  A tablespace directory can also hold the
+ * subdirectories of other clusters (of other major versions), which must not
+ * be touched.  Filled in from the catalog version that pg_controldata
+ * reports.
+ */
+static char tablespace_version_dir[64];
 
 static void
 usage(void)
@@ -134,7 +145,38 @@ load_key(const char *path, unsigned char *key)
 	if (!page_cipher_parse_key(buf, key))
 		fatal("key file \"%s\" must contain %d hexadecimal characters (two different 256-bit keys)",
 			  path, 2 * PAGE_CIPHER_KEY_LEN);
-	memset(buf, 0, sizeof(buf));
+
+	/* explicit_bzero, unlike memset, is not removed by the optimizer. */
+	explicit_bzero(buf, sizeof(buf));
+}
+
+/*
+ * Find pg_controldata: preferably the one installed next to this program,
+ * which belongs to the same PostgreSQL installation, otherwise the first one
+ * in PATH.  A pg_controldata of another major version would not understand
+ * the cluster.
+ */
+static void
+find_pg_controldata(char *path, size_t size)
+{
+	char		self[MAXPATH];
+	ssize_t		n = readlink("/proc/self/exe", self, sizeof(self) - 1);
+
+	if (n > 0)
+	{
+		char	   *slash;
+
+		self[n] = '\0';
+		slash = strrchr(self, '/');
+		if (slash != NULL)
+		{
+			*slash = '\0';
+			snprintf(path, size, "%s/pg_controldata", self);
+			if (access(path, X_OK) == 0)
+				return;
+		}
+	}
+	snprintf(path, size, "pg_controldata");
 }
 
 /*
@@ -142,21 +184,53 @@ load_key(const char *path, unsigned char *key)
  * next start would meet pages in the wrong form) and must have data
  * checksums.  pg_controldata is used to find out, instead of parsing
  * pg_control here, because that file's layout depends on the server version.
- * LC_ALL=C keeps the output in English, so that it can be matched.
+ * It also tells the catalog version, which names the tablespace
+ * subdirectory of this cluster.
+ *
+ * pg_controldata is started directly (fork and exec), not through a shell,
+ * so the data directory path is passed as is, whatever characters it
+ * contains.  LC_ALL=C keeps the output in English, so that it can be
+ * matched.
  */
 static void
 check_control(const char *pgdata)
 {
-	char		cmd[MAXPATH + 64];
+	char		prog[MAXPATH];
 	char		line[256];
+	char		catversion[32] = "";
+	int			fds[2];
+	pid_t		pid;
+	int			status;
 	FILE	   *p;
 	bool		clean = false;
 	bool		checksums = false;
 
-	snprintf(cmd, sizeof(cmd), "LC_ALL=C pg_controldata '%s' 2>&1", pgdata);
-	p = popen(cmd, "r");
+	find_pg_controldata(prog, sizeof(prog));
+
+	if (pipe(fds) != 0)
+		fatal("could not create a pipe: %s", strerror(errno));
+	fflush(NULL);
+	pid = fork();
+	if (pid < 0)
+		fatal("could not fork: %s", strerror(errno));
+	if (pid == 0)
+	{
+		/* child: send stdout and stderr into the pipe and run the program */
+		char	   *const args[] = {prog, (char *) pgdata, NULL};
+
+		close(fds[0]);
+		dup2(fds[1], STDOUT_FILENO);
+		dup2(fds[1], STDERR_FILENO);
+		close(fds[1]);
+		setenv("LC_ALL", "C", 1);
+		execvp(prog, args);
+		_exit(127);
+	}
+	close(fds[1]);
+
+	p = fdopen(fds[0], "r");
 	if (p == NULL)
-		fatal("could not run pg_controldata");
+		fatal("could not read the output of pg_controldata: %s", strerror(errno));
 	while (fgets(line, sizeof(line), p) != NULL)
 	{
 		/* Lines look like "Name:      value"; take the value. */
@@ -177,13 +251,23 @@ check_control(const char *pgdata)
 			clean = strcmp(val, "shut down") == 0;
 		else if (strncmp(line, "Data page checksum version:", 27) == 0)
 			checksums = strcmp(val, "0") != 0;
+		else if (strncmp(line, "Catalog version number:", 23) == 0)
+			snprintf(catversion, sizeof(catversion), "%s", val);
 	}
-	if (pclose(p) != 0)
-		fatal("pg_controldata failed; is \"%s\" a data directory and is pg_controldata in PATH?", pgdata);
+	fclose(p);
+	if (waitpid(pid, &status, 0) != pid || !WIFEXITED(status) || WEXITSTATUS(status) != 0)
+		fatal("%s failed; is \"%s\" a data directory of PostgreSQL %s?",
+			  prog, pgdata, PG_MAJORVERSION);
 	if (!clean)
 		fatal("the cluster was not shut down cleanly; start it and stop it again first");
 	if (!checksums)
 		fatal("data checksums are not enabled in this cluster, pg_page_crypt requires them");
+	if (catversion[0] == '\0')
+		fatal("could not find the catalog version in the output of %s", prog);
+
+	/* Same as TABLESPACE_VERSION_DIRECTORY in the server */
+	snprintf(tablespace_version_dir, sizeof(tablespace_version_dir),
+			 "PG_%s_%s", PG_MAJORVERSION, catversion);
 }
 
 /*
@@ -275,8 +359,9 @@ convert_file(const char *path, uint32_t relnumber, uint32_t segno)
 }
 
 /*
- * Convert the relation files in one database directory
- * (base/<dboid> or pg_tblspc/<spcoid>/PG_<version>_<catversion>/<dboid>).
+ * Convert the relation files in one directory: a database directory
+ * (base/<dboid> or pg_tblspc/<spcoid>/PG_<version>_<catversion>/<dboid>) or
+ * the directory of shared relations, "global".
  */
 static void
 convert_dbdir(const char *dir)
@@ -305,12 +390,12 @@ convert_dbdir(const char *dir)
 }
 
 /*
- * Call fn() for every subdirectory of "dir" whose name starts with
- * "prefix" (an empty prefix matches all).  Symbolic links to directories
- * count: tablespaces in pg_tblspc are links.
+ * Call fn() for every subdirectory of "dir", or only for the one called
+ * "name" if that is not NULL.  Symbolic links to directories count:
+ * tablespaces in pg_tblspc are links.
  */
 static void
-for_each_subdir(const char *dir, const char *prefix, void (*fn) (const char *))
+for_each_subdir(const char *dir, const char *name, void (*fn) (const char *))
 {
 	DIR		   *d = opendir(dir);
 	struct dirent *de;
@@ -322,7 +407,9 @@ for_each_subdir(const char *dir, const char *prefix, void (*fn) (const char *))
 		char		path[MAXPATH];
 		struct stat st;
 
-		if (de->d_name[0] == '.' || strncmp(de->d_name, prefix, strlen(prefix)) != 0)
+		if (de->d_name[0] == '.')
+			continue;
+		if (name != NULL && strcmp(de->d_name, name) != 0)
 			continue;
 		snprintf(path, sizeof(path), "%s/%s", dir, de->d_name);
 		if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
@@ -335,14 +422,17 @@ for_each_subdir(const char *dir, const char *prefix, void (*fn) (const char *))
 static void
 convert_tablespace_version_dir(const char *dir)
 {
-	for_each_subdir(dir, "", convert_dbdir);
+	for_each_subdir(dir, NULL, convert_dbdir);
 }
 
-/* pg_tblspc/<spcoid>/ contains one PG_* directory. */
+/*
+ * pg_tblspc/<spcoid>/ contains a PG_<version>_<catversion> directory for
+ * each cluster that uses the location.  Only our own is converted.
+ */
 static void
 convert_tablespace(const char *dir)
 {
-	for_each_subdir(dir, "PG_", convert_tablespace_version_dir);
+	for_each_subdir(dir, tablespace_version_dir, convert_tablespace_version_dir);
 }
 
 /*
@@ -421,8 +511,11 @@ main(int argc, char **argv)
 
 	/* ---- Checks on the cluster ---- */
 	snprintf(path, sizeof(path), "%s/PG_VERSION", pgdata);
-	if (!read_first_line(path, line, sizeof(line)) || strncmp(line, "17", 2) != 0)
-		fatal("\"%s\" is not a PostgreSQL 17 data directory", pgdata);
+	line[0] = '\0';
+	if (read_first_line(path, line, sizeof(line)))
+		line[strcspn(line, "\n")] = '\0';
+	if (strcmp(line, PG_MAJORVERSION) != 0)
+		fatal("\"%s\" is not a PostgreSQL %s data directory", pgdata, PG_MAJORVERSION);
 	snprintf(path, sizeof(path), "%s/postmaster.pid", pgdata);
 	if (file_exists(path))
 		fatal("the server is running (found \"%s\")", path);
@@ -433,6 +526,8 @@ main(int argc, char **argv)
 	load_key(keyfile, key);
 	if (!page_cipher_fingerprint(key, fp) || !page_cipher_init(&cipher, key))
 		fatal("could not initialize the cipher");
+	/* The cipher contexts hold their own copy of the key. */
+	explicit_bzero(key, sizeof(key));
 
 	snprintf(state_path, sizeof(state_path), "%s/%s", pgdata, PAGE_CRYPT_STATE_FILE);
 	snprintf(converting_path, sizeof(converting_path), "%s/%s", pgdata, PAGE_CRYPT_CONVERTING_FILE);
@@ -467,9 +562,11 @@ main(int argc, char **argv)
 	fclose(f);
 
 	snprintf(path, sizeof(path), "%s/base", pgdata);
-	for_each_subdir(path, "", convert_dbdir);
+	for_each_subdir(path, NULL, convert_dbdir);
+	snprintf(path, sizeof(path), "%s/global", pgdata);
+	convert_dbdir(path);
 	snprintf(path, sizeof(path), "%s/pg_tblspc", pgdata);
-	for_each_subdir(path, "", convert_tablespace);
+	for_each_subdir(path, NULL, convert_tablespace);
 
 	/*
 	 * ---- Finish ----
