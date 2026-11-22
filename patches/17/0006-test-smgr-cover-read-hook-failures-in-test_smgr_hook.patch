@@ -1,0 +1,152 @@
+From 0d53a5bd45a794f42f3d4ed51c85d3c873281452 Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Sun, 22 Nov 2026 21:32:06 +0700
+Subject: [PATCH 6/6] test(smgr): cover read hook failures in test_smgr_hooks
+
+Add the test_smgr_hooks.fail_reads setting, which makes the read hook
+report a failure for user relations, and a TAP test that checks that
+such a failure makes the read fail with an error and that the data can
+be read again once the hook succeeds.  On servers with asynchronous I/O
+the test runs for every available io_method.
+---
+ src/test/modules/test_smgr_hooks/README       |  4 ++
+ src/test/modules/test_smgr_hooks/meson.build  |  1 +
+ .../test_smgr_hooks/t/003_read_errors.pl      | 60 +++++++++++++++++++
+ .../modules/test_smgr_hooks/test_smgr_hooks.c | 13 ++++
+ 4 files changed, 78 insertions(+)
+ create mode 100644 src/test/modules/test_smgr_hooks/t/003_read_errors.pl
+
+diff --git a/src/test/modules/test_smgr_hooks/README b/src/test/modules/test_smgr_hooks/README
+index 6b5847e253f..fe8ca925e03 100644
+--- a/src/test/modules/test_smgr_hooks/README
++++ b/src/test/modules/test_smgr_hooks/README
+@@ -9,6 +9,10 @@ they are written and reverses it when they are read.  This is not a cipher;
+ it only makes the on-disk image differ from the in-memory image so that the
+ tests can tell whether the hooks are called on every path.
+ 
++Setting test_smgr_hooks.fail_reads makes the read hook report a failure
++for every non-empty block of a user relation, to test how the core handles
++errors from the read hook.
++
+ The module must be loaded with shared_preload_libraries, and only
+ relations created after initdb (relNumber >= FirstNormalObjectId) are
+ transformed, because initdb runs without the module.
+diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
+index 4804a0dbce1..fee8e7d42f6 100644
+--- a/src/test/modules/test_smgr_hooks/meson.build
++++ b/src/test/modules/test_smgr_hooks/meson.build
+@@ -24,6 +24,7 @@ tests += {
+     'tests': [
+       't/001_transform.pl',
+       't/002_events.pl',
++      't/003_read_errors.pl',
+     ],
+   },
+ }
+diff --git a/src/test/modules/test_smgr_hooks/t/003_read_errors.pl b/src/test/modules/test_smgr_hooks/t/003_read_errors.pl
+new file mode 100644
+index 00000000000..eaa73ca128b
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/t/003_read_errors.pl
+@@ -0,0 +1,60 @@
++# Copyright (c) 2024, PostgreSQL Global Development Group
++
++# Test that a failure reported by the read hook makes the read fail with an
++# error, and that the data can be read again once the hook stops failing.
++# On servers with asynchronous I/O the read hook runs in the completion
++# callback of the read, so this is checked for every available io_method.
++
++use strict;
++use warnings FATAL => 'all';
++use PostgreSQL::Test::Cluster;
++use PostgreSQL::Test::Utils;
++use Test::More;
++
++my $node = PostgreSQL::Test::Cluster->new('read_errors');
++$node->init(extra => ['--data-checksums']);
++$node->append_conf('postgresql.conf', "shared_preload_libraries = 'test_smgr_hooks'");
++$node->start;
++$node->safe_psql('postgres', qq{
++CREATE TABLE t (id int, v text);
++INSERT INTO t SELECT g, repeat('x', 100) FROM generate_series(1, 5000) g;
++CHECKPOINT;
++});
++
++# io_method exists since PostgreSQL 18; io_uring only if built with liburing.
++my @methods = (undef);
++if ($node->pg_version >= 18)
++{
++	@methods = split /,/, $node->safe_psql('postgres',
++		"SELECT array_to_string(enumvals, ',') FROM pg_settings WHERE name = 'io_method'");
++}
++
++foreach my $method (@methods)
++{
++	my $name = defined $method ? "io_method=$method" : 'synchronous I/O';
++
++	# A restart empties shared buffers, so the table is read from disk.
++	$node->append_conf('postgresql.conf', "io_method = $method") if defined $method;
++	$node->append_conf('postgresql.conf', 'test_smgr_hooks.fail_reads = on');
++	$node->restart;
++
++	is($node->safe_psql('postgres', 'SHOW io_method'), $method,
++		"$name: server runs with it") if defined $method;
++
++	my ($ret, $stdout, $stderr) = $node->psql('postgres', 'SELECT count(*) FROM t');
++	isnt($ret, 0, "$name: reading fails when the read hook fails");
++	like($stderr, qr/could not transform block \d+ in file "[^"]+" after reading it/,
++		"$name: the failure is reported");
++
++	# The failed buffers must be read again, not served from shared buffers.
++	$node->append_conf('postgresql.conf', 'test_smgr_hooks.fail_reads = off');
++	$node->reload;
++	$node->poll_query_until('postgres', 'SELECT count(*) = 5000 FROM t')
++	  or die "timed out waiting for the table to become readable";
++	is($node->safe_psql('postgres', 'SELECT sum(id) FROM t'),
++		'12502500', "$name: data is read correctly once the hook succeeds");
++}
++
++$node->stop;
++
++done_testing();
+diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+index 8a19b421562..f1501870087 100644
+--- a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
++++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+@@ -44,6 +44,9 @@ static smgr_unlink_hook_type prev_unlink_hook = NULL;
+ /* GUC: report relation-level events of user relations in the server log */
+ static bool log_events = false;
+ 
++/* GUC: make the read hook report a failure for the blocks of user relations */
++static bool fail_reads = false;
++
+ /*
+  * Output buffers of the write and extend hooks.  They are static, so that no
+  * memory is allocated while writing, and aligned for direct I/O.
+@@ -102,6 +105,8 @@ test_read_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
+ 	{
+ 		if (block_is_zero(buffers[i]))
+ 			continue;
++		if (fail_reads)
++			return i;
+ 		xor_block(buffers[i], buffers[i], blocknum + i);
+ 	}
+ 	return nblocks;
+@@ -233,6 +238,14 @@ _PG_init(void)
+ 							 PGC_SUSET,
+ 							 0,
+ 							 NULL, NULL, NULL);
++	DefineCustomBoolVariable("test_smgr_hooks.fail_reads",
++							 "Makes the read hook fail for user relations.",
++							 NULL,
++							 &fail_reads,
++							 false,
++							 PGC_SIGHUP,
++							 0,
++							 NULL, NULL, NULL);
+ 	MarkGUCPrefixReserved("test_smgr_hooks");
+ 
+ 	prev_zeroextend_hook = smgr_zeroextend_hook;
+-- 
+2.53.0
+

@@ -1,7 +1,7 @@
-From 421227a6c4962c7961b2b5f2db8c60617dad143c Mon Sep 17 00:00:00 2001
+From dc924dbec6556966d21002b9fb332a8ce43e7c28 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:21:06 +0700
-Subject: [PATCH 2/5] test(smgr): add test_smgr_hooks module
+Subject: [PATCH 2/6] test(smgr): add test_smgr_hooks module
 
 Add a test module that installs the smgr read, write and extend hooks and
 XORs the blocks of user relations with a per-block key.  The TAP test
@@ -14,8 +14,8 @@ crash recovery and is rejected when the module is not loaded.
  src/test/modules/test_smgr_hooks/README       |  14 ++
  src/test/modules/test_smgr_hooks/meson.build  |  28 ++++
  .../test_smgr_hooks/t/001_transform.pl        |  76 +++++++++
- .../modules/test_smgr_hooks/test_smgr_hooks.c | 153 ++++++++++++++++++
- 7 files changed, 294 insertions(+)
+ .../modules/test_smgr_hooks/test_smgr_hooks.c | 158 ++++++++++++++++++
+ 7 files changed, 299 insertions(+)
  create mode 100644 src/test/modules/test_smgr_hooks/Makefile
  create mode 100644 src/test/modules/test_smgr_hooks/README
  create mode 100644 src/test/modules/test_smgr_hooks/meson.build
@@ -211,10 +211,10 @@ index 00000000000..b39b2e8f670
 +done_testing();
 diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 new file mode 100644
-index 00000000000..1977889b96c
+index 00000000000..1dac56147d7
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
-@@ -0,0 +1,153 @@
+@@ -0,0 +1,158 @@
 +/*--------------------------------------------------------------------------
 + *
 + * test_smgr_hooks.c
@@ -262,9 +262,9 @@ index 00000000000..1977889b96c
 +
 +/* Only transform relations created after initdb, which ran without us. */
 +static bool
-+is_transformed(SMgrRelation reln)
++is_transformed(RelFileLocator rlocator)
 +{
-+	return reln->smgr_rlocator.locator.relNumber >= FirstNormalObjectId;
++	return rlocator.relNumber >= FirstNormalObjectId;
 +}
 +
 +static bool
@@ -292,15 +292,19 @@ index 00000000000..1977889b96c
 +		d[i] = s[i] ^ key;
 +}
 +
-+static void
-+test_read_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-+			   void **buffers, BlockNumber nblocks)
++/*
++ * The read hook may run in a critical section and in another process than
++ * the one that started the read (see smgr.h), so it only uses its arguments.
++ */
++static BlockNumber
++test_read_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
++			   BlockNumber blocknum, void **buffers, BlockNumber nblocks)
 +{
 +	if (prev_read_hook)
-+		prev_read_hook(reln, forknum, blocknum, buffers, nblocks);
++		nblocks = prev_read_hook(rlocator, forknum, blocknum, buffers, nblocks);
 +
-+	if (!is_transformed(reln))
-+		return;
++	if (!is_transformed(rlocator.locator))
++		return nblocks;
 +
 +	for (BlockNumber i = 0; i < nblocks; i++)
 +	{
@@ -308,6 +312,7 @@ index 00000000000..1977889b96c
 +			continue;
 +		xor_block(buffers[i], buffers[i], blocknum + i);
 +	}
++	return nblocks;
 +}
 +
 +static const void **
@@ -317,7 +322,7 @@ index 00000000000..1977889b96c
 +	if (prev_write_hook)
 +		buffers = prev_write_hook(reln, forknum, blocknum, buffers, nblocks);
 +
-+	if (!is_transformed(reln))
++	if (!is_transformed(reln->smgr_rlocator.locator))
 +		return buffers;
 +
 +	if (nblocks > MAX_IO_COMBINE_LIMIT)
@@ -343,7 +348,7 @@ index 00000000000..1977889b96c
 +	if (prev_extend_hook)
 +		buffer = prev_extend_hook(reln, forknum, blocknum, buffer);
 +
-+	if (!is_transformed(reln) || block_is_zero(buffer))
++	if (!is_transformed(reln->smgr_rlocator.locator) || block_is_zero(buffer))
 +		return buffer;
 +
 +	xor_block(buffer, extend_block.data, blocknum);

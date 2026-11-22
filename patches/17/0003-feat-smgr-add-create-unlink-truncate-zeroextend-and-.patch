@@ -1,7 +1,7 @@
-From e3969c07854e66e9b2a56bdc8ebeda2d1aa12919 Mon Sep 17 00:00:00 2001
+From b0b9e30c83f63c86c14e51a40b24c4001424be14 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:25:11 +0700
-Subject: [PATCH 3/5] feat(smgr): add create, unlink, truncate, zeroextend and
+Subject: [PATCH 3/6] feat(smgr): add create, unlink, truncate, zeroextend and
  sync hooks
 
 Add notification hooks for relation-level smgr operations:
@@ -15,7 +15,7 @@ sync hook itself because it bypasses smgrimmedsync().
  2 files changed, 75 insertions(+)
 
 diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
-index 1a745fbe274..b59856ce24a 100644
+index d20c653b9be..2b16b62aac6 100644
 --- a/src/backend/storage/smgr/smgr.c
 +++ b/src/backend/storage/smgr/smgr.c
 @@ -141,6 +141,11 @@ static dlist_head unpinned_relns;
@@ -74,7 +74,7 @@ index 1a745fbe274..b59856ce24a 100644
  	smgrsw[reln->smgr_which].smgr_zeroextend(reln, forknum, blocknum,
  											 nblocks, skipFsync);
  
-@@ -770,6 +789,9 @@ smgrtruncate2(SMgrRelation reln, ForkNumber *forknum, int nforks,
+@@ -781,6 +800,9 @@ smgrtruncate2(SMgrRelation reln, ForkNumber *forknum, int nforks,
  		/* Make the cached size is invalid if we encounter an error. */
  		reln->smgr_cached_nblocks[forknum[i]] = InvalidBlockNumber;
  
@@ -84,7 +84,7 @@ index 1a745fbe274..b59856ce24a 100644
  		smgrsw[reln->smgr_which].smgr_truncate(reln, forknum[i],
  											   old_nblocks[i], nblocks[i]);
  
-@@ -808,6 +830,9 @@ smgrtruncate2(SMgrRelation reln, ForkNumber *forknum, int nforks,
+@@ -819,6 +841,9 @@ smgrtruncate2(SMgrRelation reln, ForkNumber *forknum, int nforks,
  void
  smgrregistersync(SMgrRelation reln, ForkNumber forknum)
  {
@@ -94,7 +94,7 @@ index 1a745fbe274..b59856ce24a 100644
  	smgrsw[reln->smgr_which].smgr_registersync(reln, forknum);
  }
  
-@@ -840,6 +865,9 @@ smgrregistersync(SMgrRelation reln, ForkNumber forknum)
+@@ -851,6 +876,9 @@ smgrregistersync(SMgrRelation reln, ForkNumber forknum)
  void
  smgrimmedsync(SMgrRelation reln, ForkNumber forknum)
  {
@@ -105,10 +105,10 @@ index 1a745fbe274..b59856ce24a 100644
  }
  
 diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
-index 7e692ffb2b9..9b9f8c5aa73 100644
+index 567b493242a..c554e265aff 100644
 --- a/src/include/storage/smgr.h
 +++ b/src/include/storage/smgr.h
-@@ -134,9 +134,56 @@ typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
+@@ -151,9 +151,56 @@ typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
  											  BlockNumber blocknum,
  											  const void *buffer);
  

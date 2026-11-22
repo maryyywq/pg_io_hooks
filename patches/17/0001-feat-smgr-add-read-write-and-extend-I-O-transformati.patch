@@ -1,7 +1,7 @@
-From 49e8491870ef2b2b956bb482519f67ec30feb17d Mon Sep 17 00:00:00 2001
+From 8cbe8eaf041192e205c15ed50a02cafb24382db2 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:17:55 +0700
-Subject: [PATCH 1/5] feat(smgr): add read, write and extend I/O transformation
+Subject: [PATCH 1/6] feat(smgr): add read, write and extend I/O transformation
  hooks
 
 Add smgr_read_hook, smgr_write_hook and smgr_extend_hook, called from
@@ -9,17 +9,22 @@ smgrreadv(), smgrwritev() and smgrextend().  An extension can use them
 to transform block data on its way to and from the storage manager, for
 example to implement transparent page encryption.
 
+The read hook gets the relation file locator instead of an SMgrRelation
+and reports failures through its return value instead of raising an
+error.  This keeps its API the same as on servers with asynchronous I/O,
+where it runs in an I/O completion callback.
+
 The hooks follow the usual chaining convention.  Page checksums are
 computed before the write hook and verified after the read hook, so
 hooks always see the plaintext page.  With no hook registered the
 behavior is unchanged.
 ---
- src/backend/storage/smgr/smgr.c | 17 +++++++++
- src/include/storage/smgr.h      | 65 +++++++++++++++++++++++++++++++++
- 2 files changed, 82 insertions(+)
+ src/backend/storage/smgr/smgr.c | 28 +++++++++++
+ src/include/storage/smgr.h      | 82 +++++++++++++++++++++++++++++++++
+ 2 files changed, 110 insertions(+)
 
 diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
-index 1344316ee2c..1a745fbe274 100644
+index 1344316ee2c..d20c653b9be 100644
 --- a/src/backend/storage/smgr/smgr.c
 +++ b/src/backend/storage/smgr/smgr.c
 @@ -137,6 +137,11 @@ static HTAB *SMgrRelationHash = NULL;
@@ -45,18 +50,29 @@ index 1344316ee2c..1a745fbe274 100644
  	smgrsw[reln->smgr_which].smgr_extend(reln, forknum, blocknum,
  										 buffer, skipFsync);
  
-@@ -602,6 +611,10 @@ smgrreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+@@ -602,6 +611,21 @@ smgrreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  {
  	smgrsw[reln->smgr_which].smgr_readv(reln, forknum, blocknum, buffers,
  										nblocks);
 +
 +	/* Let an extension transform the blocks (e.g. decrypt them) */
 +	if (smgr_read_hook)
-+		smgr_read_hook(reln, forknum, blocknum, buffers, nblocks);
++	{
++		BlockNumber done;
++
++		done = smgr_read_hook(reln->smgr_rlocator, forknum, blocknum,
++							  buffers, nblocks);
++		if (done < nblocks)
++			ereport(ERROR,
++					(errcode(ERRCODE_DATA_CORRUPTED),
++					 errmsg("could not transform block %u in file \"%s\" after reading it",
++							blocknum + done,
++							relpath(reln->smgr_rlocator, forknum))));
++	}
  }
  
  /*
-@@ -631,6 +644,10 @@ void
+@@ -631,6 +655,10 @@ void
  smgrwritev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  		   const void **buffers, BlockNumber nblocks, bool skipFsync)
  {
@@ -68,10 +84,10 @@ index 1344316ee2c..1a745fbe274 100644
  										 buffers, nblocks, skipFsync);
  }
 diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
-index 3856d1d4f8b..7e692ffb2b9 100644
+index 3856d1d4f8b..567b493242a 100644
 --- a/src/include/storage/smgr.h
 +++ b/src/include/storage/smgr.h
-@@ -73,6 +73,71 @@ typedef SMgrRelationData *SMgrRelation;
+@@ -73,6 +73,88 @@ typedef SMgrRelationData *SMgrRelation;
  #define SmgrIsTemp(smgr) \
  	RelFileLocatorBackendIsTemp((smgr)->smgr_rlocator)
  
@@ -96,19 +112,36 @@ index 3856d1d4f8b..7e692ffb2b9 100644
 + * before the write hook runs and verifies it after the read hook has run, so
 + * both always see the untransformed (plaintext) page image.
 + *
-+ * Errors must be reported with ereport(ERROR).  A hook must not modify the
-+ * buffers passed to the write and extend hooks, because they may be shared
-+ * buffers.
++ * Except for the read hook, which has stricter rules (see below), errors are
++ * reported with ereport(ERROR).  A hook must not modify the buffers passed to
++ * the write and extend hooks, because they may be shared buffers.
 + */
 +
 +/*
-+ * smgr_read_hook_type: called after smgrreadv() has read "nblocks" blocks
-+ * starting at "blocknum" into "buffers", before the caller looks at them.
-+ * The hook may transform the blocks in place (e.g. decrypt them).
++ * smgr_read_hook_type: called after "nblocks" blocks starting at "blocknum"
++ * have been read into "buffers", before their checksums are verified and
++ * before the caller looks at them.  The hook may transform the blocks in
++ * place (e.g. decrypt them).
++ *
++ * The hook returns the number of leading blocks it has processed
++ * successfully, which is "nblocks" unless something went wrong.  A smaller
++ * value makes the read fail with an error that names block
++ * "blocknum + result".  A hook that chains to a previous one processes, and
++ * returns at most, the number of blocks that the previous hook returned.
++ *
++ * The read hook must not raise ERROR or allocate memory, and may rely only on
++ * state set up in _PG_init() and on shared memory.  This keeps the API the
++ * same on servers with asynchronous I/O (PostgreSQL 18 and later), where the
++ * hook runs in the completion callback of a read: in a critical section, and
++ * possibly in another process (an I/O worker or another backend) than the
++ * one that started the read.  For the same reason the hook receives the
++ * relation file locator rather than an SMgrRelation.
 + */
-+typedef void (*smgr_read_hook_type) (SMgrRelation reln, ForkNumber forknum,
-+									 BlockNumber blocknum,
-+									 void **buffers, BlockNumber nblocks);
++typedef BlockNumber (*smgr_read_hook_type) (RelFileLocatorBackend rlocator,
++											ForkNumber forknum,
++											BlockNumber blocknum,
++											void **buffers,
++											BlockNumber nblocks);
 +
 +/*
 + * smgr_write_hook_type: called by smgrwritev() before the blocks are written.

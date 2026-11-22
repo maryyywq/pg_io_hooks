@@ -269,15 +269,23 @@ audit_event(AuditOp op, ForkNumber fork, RelFileLocator rlocator,
  * fail.
  */
 
-static void
-audit_read_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-				void **buffers, BlockNumber nblocks)
+/*
+ * On PostgreSQL 18 and later the read hook usually runs in the completion
+ * callback of an asynchronous read, in a critical section and possibly in an
+ * I/O worker or another backend; audit_event() is safe there (it only
+ * touches shared memory, without locks or allocations).  The recorded pid is
+ * then that of the process that completed the read.  Only the blocks that
+ * the previous hooks processed successfully are counted.
+ */
+static BlockNumber
+audit_read_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
+				BlockNumber blocknum, void **buffers, BlockNumber nblocks)
 {
 	if (prev_read_hook)
-		prev_read_hook(reln, forknum, blocknum, buffers, nblocks);
+		nblocks = prev_read_hook(rlocator, forknum, blocknum, buffers, nblocks);
 
-	audit_event(AUDIT_READ, forknum, reln->smgr_rlocator.locator,
-				blocknum, nblocks);
+	audit_event(AUDIT_READ, forknum, rlocator.locator, blocknum, nblocks);
+	return nblocks;
 }
 
 static const void **

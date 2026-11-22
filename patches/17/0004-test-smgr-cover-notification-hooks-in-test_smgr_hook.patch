@@ -1,7 +1,7 @@
-From ded405a9f30f4ac44adca7062d51bde7fae3a36d Mon Sep 17 00:00:00 2001
+From 0af102e12f3f920025e7476bd77f416b1a4e646f Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:25:11 +0700
-Subject: [PATCH 4/5] test(smgr): cover notification hooks in test_smgr_hooks
+Subject: [PATCH 4/6] test(smgr): cover notification hooks in test_smgr_hooks
 
 Add the test_smgr_hooks.log_events GUC, which logs relation-level smgr
 events of user relations, and a TAP test that checks every notification
@@ -104,7 +104,7 @@ index 00000000000..18b3bad49b9
 +$node->stop;
 +done_testing();
 diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
-index 1977889b96c..4a6b8b6e070 100644
+index 1dac56147d7..8a19b421562 100644
 --- a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 +++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 @@ -25,6 +25,7 @@
@@ -130,7 +130,7 @@ index 1977889b96c..4a6b8b6e070 100644
  
  /*
   * Output buffers of the write and extend hooks.  They are static, so that no
-@@ -133,6 +142,73 @@ test_extend_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+@@ -138,6 +147,73 @@ test_extend_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
  	return extend_block.data;
  }
  
@@ -204,7 +204,7 @@ index 1977889b96c..4a6b8b6e070 100644
  void
  _PG_init(void)
  {
-@@ -144,6 +220,27 @@ _PG_init(void)
+@@ -149,6 +225,27 @@ _PG_init(void)
  		ereport(ERROR,
  				(errmsg("test_smgr_hooks must be loaded via shared_preload_libraries")));
  
