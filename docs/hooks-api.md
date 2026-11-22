@@ -6,6 +6,10 @@ They are declared in `src/include/storage/smgr.h` and called from
 when it is called, and the rules an extension must follow. The reasons for
 the design are in [design.md](design.md).
 
+The API is the same for PostgreSQL 17, 18 and 19, so an extension builds for
+all three from one source. Where the versions differ in how a hook is
+called, this page says so.
+
 ## Overview
 
 Hooks come in two kinds.
@@ -38,8 +42,9 @@ test of a pointer per call.
 ## Common rules
 
 - **Loading.** Hooks are called from every process that does relation I/O:
-  backends, the background writer, the checkpointer and the startup process
-  (WAL replay). An extension that changes the on-disk format must therefore
+  backends, the background writer, the checkpointer, the startup process
+  (WAL replay) and, for the read hook on PostgreSQL 18 and later, I/O
+  workers. An extension that changes the on-disk format must therefore
   be loaded with `shared_preload_libraries`, so that it is active in all of
   them from the start. Check `process_shared_preload_libraries_in_progress`
   in `_PG_init()`.
@@ -47,8 +52,9 @@ test of a pointer per call.
   the previous value of the variable in `_PG_init()`, install your function,
   and call the previous hook from yours. See [Chaining](#chaining).
 - **Errors.** Report problems with `ereport(ERROR, ...)`. The operation then
-  fails the same way a failing file read or write does. The two exceptions
-  are the truncate and unlink hooks, described below.
+  fails the same way a failing file read or write does. The exceptions are
+  the read hook, which reports a failure through its return value, and the
+  truncate and unlink hooks, described below.
 - **Checksums.** Page checksums are not the hooks' concern. The core computes
   a page's checksum before the write hook runs and verifies it after the read
   hook has run, so both hooks always work with the ordinary (untransformed)
@@ -56,25 +62,64 @@ test of a pointer per call.
 - **Context.** Hooks receive the `SMgrRelation`, which identifies the
   relation file (`reln->smgr_rlocator.locator` is the tablespace, database
   and relation file number; `reln->smgr_rlocator.backend` tells whether it is
-  a temporary relation), the fork, and the block number. Block numbers are
-  numbers within the relation, not within a 1 GB segment file.
+  a temporary relation), the fork, and the block number. The read and unlink
+  hooks receive the `RelFileLocatorBackend` (the same as
+  `reln->smgr_rlocator`) instead. Block numbers are numbers within the
+  relation, not within a 1 GB segment file.
 
 ## Transforming hooks
 
 ### `smgr_read_hook`
 
 ```c
-typedef void (*smgr_read_hook_type) (SMgrRelation reln, ForkNumber forknum,
-                                     BlockNumber blocknum,
-                                     void **buffers, BlockNumber nblocks);
+typedef BlockNumber (*smgr_read_hook_type) (RelFileLocatorBackend rlocator,
+                                            ForkNumber forknum,
+                                            BlockNumber blocknum,
+                                            void **buffers,
+                                            BlockNumber nblocks);
 ```
 
-Called at the end of `smgrreadv()`, after `nblocks` blocks starting at
-`blocknum` were read into `buffers`, and before the caller looks at them. The
-hook may change the blocks in place (for example decrypt them).
+Called after `nblocks` blocks starting at `blocknum` were read into
+`buffers`, and before anyone looks at them. The hook may change the blocks in
+place (for example decrypt them).
 
-Because the caller checks the page checksum after this hook, the checksum is
-verified against the decrypted page.
+Because the page checksums are verified after this hook, they are checked
+against the decrypted pages.
+
+**Return value.** The hook returns the number of leading blocks it processed
+successfully, normally `nblocks`. A smaller value `n` makes the read fail
+with
+
+```
+ERROR:  could not transform block <blocknum + n> in file "<path>" after reading it
+```
+
+The buffers are not marked valid, so a later read of the same blocks reads
+them from the file again and calls the hook again. A hook that chains to a
+previous one processes only as many blocks as the previous hook returned,
+and returns at most that number.
+
+**Where it runs.** On PostgreSQL 17 the hook is called at the end of
+`smgrreadv()`, in the process that reads. From PostgreSQL 18 on, the buffer
+manager reads with asynchronous I/O (`smgrstartreadv()`), and the hook is
+called from the completion callback of the read, which:
+
+- runs in a **critical section**, so the hook **must not raise an error or
+  allocate memory** (`palloc`). Logging with `elog(LOG)` is allowed;
+- may run in **another process** than the one that started the read,
+  depending on `io_method`: the process itself (`sync`), an I/O worker
+  (`worker`), or whichever backend collects the completion (`io_uring`). So
+  the hook must use only its arguments, state that `_PG_init()` set up (which
+  every process inherits from the postmaster), and shared memory. This is
+  also why it gets a `RelFileLocatorBackend` and not an `SMgrRelation`: the
+  relation need not be open in that process;
+- only sees the blocks that were actually read. After a short read the
+  caller starts another read for the rest, and the hook is called again for
+  those blocks.
+
+Synchronous `smgrreadv()` calls (used for example when copying a relation)
+still call the hook directly. The rules are the same on PostgreSQL 17, so an
+extension that follows them works on all versions.
 
 Blocks that were read past the end of the file during recovery are zero-filled
 by the server and also reach the hook; a transformation must leave all-zero
@@ -145,7 +190,8 @@ typedef void (*smgr_unlink_hook_type) (RelFileLocatorBackend rlocator,
   for a sync that happens now (`smgrimmedsync()`, and `smgrdosyncall()`) and
   false for one queued for the next checkpoint (`smgrregistersync()`).
 - **`smgr_truncate_hook`** is called before a fork is truncated from
-  `old_nblocks` to `nblocks` blocks. `smgrtruncate2()` normally runs inside a
+  `old_nblocks` to `nblocks` blocks. `smgrtruncate2()` (`smgrtruncate()` from
+  PostgreSQL 18 on) normally runs inside a
   critical section, so this hook **must not allocate memory or raise an
   error.**
 - **`smgr_create_hook`** is called after the storage of a fork was created.
@@ -160,12 +206,12 @@ typedef void (*smgr_unlink_hook_type) (RelFileLocatorBackend rlocator,
 
 | Hook | Place in `smgr.c` | Position |
 |------|-------------------|----------|
-| `smgr_read_hook` | `smgrreadv()` | after the read |
+| `smgr_read_hook` | `smgrreadv()`; from PostgreSQL 18 on also the AIO completion callback `PGAIO_HCB_SMGR_READV` of `smgrstartreadv()` | after the read |
 | `smgr_write_hook` | `smgrwritev()` | before the write |
 | `smgr_extend_hook` | `smgrextend()` | before the write |
 | `smgr_zeroextend_hook` | `smgrzeroextend()` | before |
 | `smgr_sync_hook` | `smgrimmedsync()`, `smgrregistersync()`, `smgrdosyncall()` | before |
-| `smgr_truncate_hook` | `smgrtruncate2()`, once per fork | before |
+| `smgr_truncate_hook` | `smgrtruncate2()` (17), `smgrtruncate()` (18, 19), once per fork | before |
 | `smgr_create_hook` | `smgrcreate()` | after |
 | `smgr_unlink_hook` | `smgrdounlinkall()`, once per fork | before |
 
@@ -173,6 +219,19 @@ typedef void (*smgr_unlink_hook_type) (RelFileLocatorBackend rlocator,
 `smgrreadv()` and `smgrwritev()` with one block, so they are covered too. All
 users of the storage manager are covered: the buffer manager, bulk writes
 (`bulk_write.c`), relation copying, WAL replay.
+
+On PostgreSQL 18 and later, `smgrstartreadv()` registers the
+`PGAIO_HCB_SMGR_READV` callback on the I/O handle when a read hook is set.
+Completion callbacks run in the reverse order of registration, so it runs
+after the callback of `md.c` (which turns the result into a number of blocks
+and reports I/O errors) and before the one of the buffer manager (which
+verifies the page checksums):
+
+```
+bufmgr: register SHARED_BUFFER_READV -> smgrstartreadv: register SMGR_READV
+    -> mdstartreadv: register MD_READV, start the read
+completion: MD_READV -> SMGR_READV (calls smgr_read_hook) -> SHARED_BUFFER_READV
+```
 
 Some commands create or remove relation files as whole directories, without
 the storage manager, and therefore without the create and unlink hooks:

@@ -2,8 +2,8 @@
 
 [![CI](https://github.com/maryyywq/pg_io_hooks/actions/workflows/ci.yml/badge.svg)](https://github.com/maryyywq/pg_io_hooks/actions/workflows/ci.yml)
 
-Storage I/O transformation hooks for PostgreSQL 17, and prototype extensions
-built on top of them.
+Storage I/O transformation hooks for PostgreSQL 17, 18 and 19, and prototype
+extensions built on top of them.
 
 PostgreSQL has a rich system of hooks and extensions, but no way for an
 extension to look at, or change, the blocks that move between shared buffers
@@ -16,12 +16,25 @@ proves with two extensions that they are enough.
 
 | Part | Where | Description |
 |------|-------|-------------|
-| Patches for PostgreSQL 17 | [`patches/`](patches/) | 8 hooks in the storage manager (157 lines in `smgr.h` and `smgr.c`) and a test module |
+| Patches for PostgreSQL 17, 18, 19 | [`patches/`](patches/) | 8 hooks in the storage manager (`smgr.h`, `smgr.c`; on 18 and 19 also an I/O completion callback) and a test module |
 | `pg_page_crypt` | [`extensions/pg_page_crypt/`](extensions/pg_page_crypt/) | Transparent encryption of relation files (AES-256-XTS), with a tool that converts a cluster |
 | `pg_io_audit` | [`extensions/pg_io_audit/`](extensions/pg_io_audit/) | Counts and traces storage I/O operations; shows them in SQL views |
-| Tests | [`tests/`](tests/), `t/` of each extension, the test module in the patches | 345 checks, all run by one script and by CI |
+| Tests | [`tests/`](tests/), `t/` of each extension, the test module in the patches | all run by one script and by CI, on each version and, on 18 and 19, with each `io_method` |
 | Scripts | [`scripts/`](scripts/) | Build PostgreSQL with the patches, run all tests |
 | Documentation | [`docs/`](docs/) | API reference, design rationale, tests, limitations |
+
+## Supported versions
+
+| PostgreSQL | Patches based on | `io_method` tested |
+|------------|------------------|--------------------|
+| 17 | a `REL_17_STABLE` commit | (no asynchronous I/O) |
+| 18 | 18.7 | `sync`, `worker`, `io_uring` |
+| 19 | 19.0 | `sync`, `worker`, `io_uring` |
+
+The hooks API is the same on all three, and the extensions build from the
+same source. Since PostgreSQL 18 reads are asynchronous: the read hook runs
+when a read completes, possibly in an I/O worker or another backend, and must
+not raise errors (see [docs/hooks-api.md](docs/hooks-api.md#smgr_read_hook)).
 
 ## How it works
 
@@ -30,7 +43,9 @@ proves with two extensions that they are enough.
                                |
                         buffer manager
           (sets the page checksum before a write, verifies it after a read)
-                               |
+                               |                  (18+: reads complete in AIO
+                               |                   callbacks, the read hook
+                               |                   runs in one of them)
           +--------------------+---------------------+
           |                  smgr.c                  |   <- the hooks
           |   read  write  extend  zeroextend  sync  |
@@ -66,20 +81,22 @@ git clone https://github.com/maryyywq/pg_io_hooks.git
 cd pg_io_hooks
 
 scripts/install-deps-debian.sh   # build tools and libraries (uses sudo)
-scripts/build-postgres.sh        # fetch PostgreSQL 17, apply the patches, build, install
+scripts/build-postgres.sh        # fetch PostgreSQL 19, apply the patches, build, install
 scripts/run-tests.sh             # run everything
 ```
 
-`build-postgres.sh` puts everything under `./build` (see the comments at the
-top of the script for the variables that change this, including a `release`
-build). When it finishes it prints the `PATH` to use.
+For another version set `PG_VERSION` for both scripts, for example
+`PG_VERSION=18 scripts/build-postgres.sh`. `build-postgres.sh` puts
+everything under `./build/<version>` (see the comments at the top of the
+script for the variables that change this, including a `release` build). When
+it finishes it prints the `PATH` to use.
 
 ### Using the extensions
 
 Install them into that server (the tests do this too):
 
 ```
-export PATH="$PWD/build/install/bin:$PATH"
+export PATH="$PWD/build/19/install/bin:$PATH"
 make -C extensions/pg_io_audit install
 make -C extensions/pg_page_crypt install
 ```

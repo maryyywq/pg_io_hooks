@@ -5,9 +5,15 @@ noted, deliberate.
 
 ## The hooks
 
-- **PostgreSQL 17 only.** The patches apply to the base commit named in
-  [patches/README.md](../patches/README.md). They were not ported to other
-  versions.
+- **PostgreSQL 17, 18 and 19 only.** The patches for each version apply to
+  the base commit named in [patches/README.md](../patches/README.md) (a
+  `REL_17_STABLE` commit, `REL_18_7` and `REL_19_0`); other minor releases
+  may need a rebase.
+- **The read hook cannot raise errors and runs in other processes.** On
+  PostgreSQL 18 and later it runs in an I/O completion callback (critical
+  section, possibly an I/O worker or another backend); see
+  [hooks-api.md](hooks-api.md#smgr_read_hook). A failure fails the whole
+  read; the hook cannot say why, the error only names the block.
 - **Only what goes through the storage manager.** The WAL, SLRU files,
   temporary files and `pg_control` are not seen by the hooks. Tools and
   server code that read or copy relation files directly (`pg_basebackup`,
@@ -76,7 +82,11 @@ noted, deliberate.
 - Counters live in shared memory and start from zero at each server start,
   and again when the server reinitializes after a crash of a server process.
 - Counts are requests seen by the hooks, taken before the file system
-  operation, which may still fail.
+  operation, which may still fail. The exception are reads: the read hook
+  runs after the read, so they count the blocks actually read. On
+  PostgreSQL 18 and later it runs when an asynchronous read completes, so the
+  `pid` in the trace is that of the process that completed the read (for
+  example an I/O worker), not necessarily the one that asked for the data.
 - `unlink` counts relations, not forks: the hook is called for every fork
   number whether or not the fork exists.
 - `create` and `unlink` do not count the files of whole databases that are
