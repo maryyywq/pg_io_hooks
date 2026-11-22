@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #
-# Install the packages needed to build PostgreSQL 17 with the patches from
-# this repository and to run the tests, on Debian and Ubuntu.
+# Install the packages needed to build PostgreSQL 17, 18 or 19 with the
+# patches from this repository and to run the tests, on Debian and Ubuntu.
+# liburing is needed for io_method = io_uring on PostgreSQL 18 and later.
 #
 # Usage: scripts/install-deps-debian.sh
 set -euo pipefail
@@ -22,6 +23,7 @@ $SUDO apt-get install -y --no-install-recommends \
     libipc-run-perl \
     libreadline-dev \
     libssl-dev \
+    liburing-dev \
     perl \
     pkg-config \
     zlib1g-dev
