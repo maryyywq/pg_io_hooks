@@ -32,7 +32,9 @@ noted, deliberate.
   size of the original.
 - **Cluster-wide.** No selection per relation or tablespace.
 - **No WAL hooks.**
-- **Performance has not been measured** (see [testing.md](testing.md)).
+- **Performance was measured only for PostgreSQL 19,** with the default
+  `io_method` and data that fits into the page cache (see
+  [performance.md](performance.md#not-measured)).
 
 ## `pg_page_crypt`
 

@@ -91,9 +91,8 @@ PostgreSQL, applying the patches), with debug builds (assertions enabled).
 
 ## Not covered yet
 
-- Performance. The design claim is that unset hooks cost one NULL test per
-  call; this has not been measured, and neither has the overhead of the
-  extensions.
+- Performance is measured separately, not by these tests; see
+  [performance.md](performance.md) for what is and is not covered.
 - `pg_rewind`, `pg_upgrade`, `pg_combinebackup` and logical replication with
   an encrypted cluster.
 - Servers built without OpenSSL, other platforms, other PostgreSQL versions
