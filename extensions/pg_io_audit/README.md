@@ -10,7 +10,8 @@ extension that transforms data (for example page encryption).
 
 ## Requirements
 
-PostgreSQL 17 with the patch series from `../../patches/` applied.
+PostgreSQL 17, 18 or 19 with the matching patch series from
+`../../patches/` applied.
 
 ## Build and install
 
