@@ -1,4 +1,4 @@
-From 8cbe8eaf041192e205c15ed50a02cafb24382db2 Mon Sep 17 00:00:00 2001
+From 903f8be7079100b2efa36220be7c7d18045f6b55 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:17:55 +0700
 Subject: [PATCH 1/6] feat(smgr): add read, write and extend I/O transformation
@@ -19,9 +19,9 @@ computed before the write hook and verified after the read hook, so
 hooks always see the plaintext page.  With no hook registered the
 behavior is unchanged.
 ---
- src/backend/storage/smgr/smgr.c | 28 +++++++++++
- src/include/storage/smgr.h      | 82 +++++++++++++++++++++++++++++++++
- 2 files changed, 110 insertions(+)
+ src/backend/storage/smgr/smgr.c | 28 ++++++++++
+ src/include/storage/smgr.h      | 95 +++++++++++++++++++++++++++++++++
+ 2 files changed, 123 insertions(+)
 
 diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
 index 1344316ee2c..d20c653b9be 100644
@@ -84,10 +84,10 @@ index 1344316ee2c..d20c653b9be 100644
  										 buffers, nblocks, skipFsync);
  }
 diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
-index 3856d1d4f8b..567b493242a 100644
+index 3856d1d4f8b..4c8b4dcc78b 100644
 --- a/src/include/storage/smgr.h
 +++ b/src/include/storage/smgr.h
-@@ -73,6 +73,88 @@ typedef SMgrRelationData *SMgrRelation;
+@@ -73,6 +73,101 @@ typedef SMgrRelationData *SMgrRelation;
  #define SmgrIsTemp(smgr) \
  	RelFileLocatorBackendIsTemp((smgr)->smgr_rlocator)
  
@@ -116,6 +116,19 @@ index 3856d1d4f8b..567b493242a 100644
 + * reported with ereport(ERROR).  A hook must not modify the buffers passed to
 + * the write and extend hooks, because they may be shared buffers.
 + */
++
++/*
++ * Version of the hooks API, for extensions to check at compile time:
++ *
++ *   #if !defined(SMGR_HOOKS_API_VERSION) || SMGR_HOOKS_API_VERSION < 2
++ *   #error "this extension needs a server with the smgr hooks"
++ *   #endif
++ *
++ * Version 2 is the API described here.  (Version 1 differed only in the
++ * read hook, which took an SMgrRelation, returned nothing and could raise
++ * ERROR; it was never released.)
++ */
++#define SMGR_HOOKS_API_VERSION 2
 +
 +/*
 + * smgr_read_hook_type: called after "nblocks" blocks starting at "blocknum"
@@ -177,7 +190,7 @@ index 3856d1d4f8b..567b493242a 100644
  extern SMgrRelation smgropen(RelFileLocator rlocator, ProcNumber backend);
  extern bool smgrexists(SMgrRelation reln, ForkNumber forknum);
 
-base-commit: 179f22f256ab50bdd0a4351a8b9def13876e4c43
+base-commit: 702b3dc86d35bcc08c8e23cffa3c4d9fe9d32c85
 -- 
 2.53.0
 

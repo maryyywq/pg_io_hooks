@@ -7,7 +7,7 @@ applies, in order, to a fixed commit, also recorded in its `0001-*.patch` as
 
 | Directory | Base | Commit |
 |-----------|------|--------|
-| `17/` | a commit of `REL_17_STABLE` | `179f22f256ab50bdd0a4351a8b9def13876e4c43` |
+| `17/` | tag `REL_17_12` (17.12) | `702b3dc86d35bcc08c8e23cffa3c4d9fe9d32c85` |
 | `18/` | tag `REL_18_7` (18.7) | `f5c41f6681c910b3f69951bf6fb97c6d74605d25` |
 | `19/` | tag `REL_19_0` (19.0) | `5c839a2a08b9b87a349be97371fac6c5a2873b10` |
 
@@ -28,9 +28,9 @@ PostgreSQL 18 introduced asynchronous I/O, and the buffer manager reads with
 therefore also called from an I/O completion callback. See
 [docs/design.md](../docs/design.md#asynchronous-reads-postgresql-18-and-later).
 
-The core change consists only of added lines: 185 on PostgreSQL 17
-(`smgr.h` 129, mostly the comments that define the contract of the hooks,
-and `smgr.c` 56) and 310 on 18 and 19 (`smgr.h` 134, `smgr.c` 172, of which
+The core change consists only of added lines: 198 on PostgreSQL 17
+(`smgr.h` 142, mostly the comments that define the contract of the hooks,
+and `smgr.c` 56) and 323 on 18 and 19 (`smgr.h` 147, `smgr.c` 172, of which
 about 100 are the completion callback, and 2 lines each in `aio.h` and
 `aio_callback.c`); the rest is the test module. With no hook set, each hook
 costs one test of a NULL pointer.
@@ -40,7 +40,7 @@ costs one test of a NULL pointer.
 ```
 git clone https://github.com/postgres/postgres.git
 cd postgres
-git checkout REL_19_0          # or REL_18_7, or 179f22f256ab50bdd0a4351a8b9def13876e4c43 for 17
+git checkout REL_19_0          # or REL_18_7, or REL_17_12
 git am /path/to/pg_io_hooks/patches/19/*.patch
 ```
 

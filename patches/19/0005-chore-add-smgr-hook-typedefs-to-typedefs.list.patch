@@ -1,4 +1,4 @@
-From 52f0803737048c683ec5045c6875366fa381d3f9 Mon Sep 17 00:00:00 2001
+From 9d87e4d4c346b5871c00c1af18885fb55e7e13af Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:27:47 +0700
 Subject: [PATCH 5/6] chore: add smgr hook typedefs to typedefs.list

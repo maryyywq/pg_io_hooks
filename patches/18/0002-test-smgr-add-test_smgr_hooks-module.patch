@@ -1,4 +1,4 @@
-From b376e1370883300230f1519652cf2411a65782c8 Mon Sep 17 00:00:00 2001
+From 17d3aa39ead4a3a5b7ce1c9b21382cae9ffc98c9 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:21:06 +0700
 Subject: [PATCH 2/6] test(smgr): add test_smgr_hooks module
@@ -95,11 +95,11 @@ index 00000000000..6b5847e253f
 +transformed, because initdb runs without the module.
 diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
 new file mode 100644
-index 00000000000..7256b7503a3
+index 00000000000..ce39b4cabbf
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/meson.build
 @@ -0,0 +1,28 @@
-+# Copyright (c) 2024, PostgreSQL Global Development Group
++# Copyright (c) 2025, PostgreSQL Global Development Group
 +
 +test_smgr_hooks_sources = files(
 +  'test_smgr_hooks.c',
@@ -129,11 +129,11 @@ index 00000000000..7256b7503a3
 +}
 diff --git a/src/test/modules/test_smgr_hooks/t/001_transform.pl b/src/test/modules/test_smgr_hooks/t/001_transform.pl
 new file mode 100644
-index 00000000000..b39b2e8f670
+index 00000000000..cda55cbd915
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/t/001_transform.pl
 @@ -0,0 +1,76 @@
-+# Copyright (c) 2024, PostgreSQL Global Development Group
++# Copyright (c) 2025, PostgreSQL Global Development Group
 +
 +# Test the smgr I/O transformation hooks through test_smgr_hooks: the data
 +# must be stored transformed, read back correctly, survive crash recovery,
@@ -211,7 +211,7 @@ index 00000000000..b39b2e8f670
 +done_testing();
 diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 new file mode 100644
-index 00000000000..1dac56147d7
+index 00000000000..6b57ca2101f
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 @@ -0,0 +1,158 @@
@@ -226,7 +226,7 @@ index 00000000000..1dac56147d7
 + * are produced by relation extension without any hook call and must be read
 + * back as empty pages.
 + *
-+ * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1996-2025, PostgreSQL Global Development Group
 + * Portions Copyright (c) 1994, Regents of the University of California
 + *
 + * IDENTIFICATION

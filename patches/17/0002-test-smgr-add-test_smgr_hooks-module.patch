@@ -1,4 +1,4 @@
-From dc924dbec6556966d21002b9fb332a8ce43e7c28 Mon Sep 17 00:00:00 2001
+From bd085b3c81de1721ccdc484185a7f1cc077cfcc2 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:21:06 +0700
 Subject: [PATCH 2/6] test(smgr): add test_smgr_hooks module

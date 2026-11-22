@@ -1,4 +1,4 @@
-From 0af102e12f3f920025e7476bd77f416b1a4e646f Mon Sep 17 00:00:00 2001
+From 4ea0b6ce1823def7270f7197400c53957bd39830 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:25:11 +0700
 Subject: [PATCH 4/6] test(smgr): cover notification hooks in test_smgr_hooks

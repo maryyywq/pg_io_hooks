@@ -1,4 +1,4 @@
-From 8cf9ad78e94447920345a935dd1764f294f394dc Mon Sep 17 00:00:00 2001
+From 4ccd6a2a17e9c4f5e7653d952c75a789aaebcbf3 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:25:11 +0700
 Subject: [PATCH 3/6] feat(smgr): add create, unlink, truncate, zeroextend and
@@ -107,10 +107,10 @@ index 050af0f988e..3914d86eb83 100644
  	RESUME_INTERRUPTS();
  }
 diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
-index 014b1b42768..f2c8457e65f 100644
+index 1ab63e20b0a..d974a4e6a7b 100644
 --- a/src/include/storage/smgr.h
 +++ b/src/include/storage/smgr.h
-@@ -158,10 +158,57 @@ typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
+@@ -171,10 +171,57 @@ typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
  											  BlockNumber blocknum,
  											  const void *buffer);
  
