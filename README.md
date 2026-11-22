@@ -119,7 +119,9 @@ The hooks and both extensions are implemented and tested (see
 - `pg_page_crypt` does not encrypt the WAL or the system catalogs, offers no
   authentication beyond page checksums, and keeps the key in a file. It is not
   meant for production.
-- Performance has not been measured yet.
+- With no extension loaded the hooks cost nothing measurable;
+  `pg_page_crypt` costs about 10% of read-only throughput when the data does
+  not fit into shared buffers ([docs/performance.md](docs/performance.md)).
 
 ## Documentation
 
@@ -128,6 +130,8 @@ The hooks and both extensions are implemented and tested (see
 - [Design and rationale](docs/design.md): the choices and how they compare
   with other proposals
 - [Testing](docs/testing.md): what is tested and how to run it
+- [Performance](docs/performance.md): the overhead of the hooks and the
+  extensions, measured with pgbench
 - [Limitations](docs/limitations.md)
 - [Patches](patches/README.md): the patch series and how to apply it
 
