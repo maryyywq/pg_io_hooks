@@ -13,9 +13,11 @@ not meant for production use.
 
 ## Requirements
 
-- PostgreSQL 17 with the patch series from `../../patches/` applied
+- PostgreSQL 17, 18 or 19 with the matching patch series from
+  `../../patches/` applied
 - OpenSSL development files
-- Data checksums enabled in the cluster (`initdb --data-checksums`)
+- Data checksums enabled in the cluster (the default of `initdb` since
+  PostgreSQL 18; use `initdb --data-checksums` on 17)
 
 ## Build and install
 

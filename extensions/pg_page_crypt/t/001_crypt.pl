@@ -138,7 +138,8 @@ $node->stop;
 
 # ---- Clusters the module must refuse ----
 my $nochk = PostgreSQL::Test::Cluster->new('nochecksums');
-$nochk->init;
+# Since PostgreSQL 18, initdb enables data checksums by default.
+$nochk->init(extra => $nochk->pg_version >= 18 ? ['--no-data-checksums'] : []);
 make_key("$tmp/k3.hex");
 command_fails(['pg_page_crypt_convert', '--encrypt', '-D', $nochk->data_dir, '--key-file', "$tmp/k3.hex"],
 	'the tool refuses a cluster without data checksums');

@@ -42,6 +42,7 @@
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "utils/timestamp.h"
+#include "utils/tuplestore.h"
 
 PG_MODULE_MAGIC;
 
