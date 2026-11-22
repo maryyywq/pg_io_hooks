@@ -1,0 +1,88 @@
+name: Benchmark
+
+# Measures the overhead of the hooks and of the extensions with pgbench (see
+# scripts/bench.sh and docs/performance.md): release builds of PostgreSQL 19
+# with and without the patches, four configurations, read-only and
+# read-write.  Runs on demand, and on pull requests that change the
+# benchmark itself.  The results are in the job summary and in the
+# "bench-results" artifact.
+
+on:
+  workflow_dispatch:
+    inputs:
+      scale:
+        description: pgbench scale factor
+        default: '100'
+      duration:
+        description: seconds per pgbench run
+        default: '60'
+      rounds:
+        description: number of rounds
+        default: '5'
+  pull_request:
+    paths:
+      - scripts/bench.sh
+      - .github/workflows/bench.yml
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: pgbench (PostgreSQL 19)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+
+    env:
+      PG_VERSION: '19'
+      BUILD_TYPE: release
+      SCALE: ${{ inputs.scale || '100' }}
+      DURATION: ${{ inputs.duration || '60' }}
+      ROUNDS: ${{ inputs.rounds || '5' }}
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: scripts/install-deps-debian.sh
+
+      - name: Build PostgreSQL with the patches
+        run: WORKDIR=build/19-release scripts/build-postgres.sh
+
+      - name: Build PostgreSQL without the patches
+        run: WORKDIR=build/19-vanilla APPLY_PATCHES=no scripts/build-postgres.sh
+
+      - name: Describe the machine
+        run: |
+          {
+            echo '### Machine'
+            echo
+            echo '```'
+            lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core)'
+            free -h | head -2
+            uname -r
+            echo '```'
+            echo
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run the benchmark
+        run: |
+          scripts/bench.sh | tee bench.out
+          {
+            echo '### Results'
+            echo
+            sed -n '/^PostgreSQL /,$p' bench.out
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-results
+          path: |
+            build/bench/results.csv
+            build/bench/*.log
+            bench.out
+          if-no-files-found: ignore
