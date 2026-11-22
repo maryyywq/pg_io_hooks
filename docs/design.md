@@ -61,10 +61,51 @@ inside those calls, so the write hook sees a page whose checksum is already
 set, and the read hook has finished before the checksum is verified. Nothing
 else has to know about the transformation.
 
+## Asynchronous reads (PostgreSQL 18 and later)
+
+PostgreSQL 18 added asynchronous I/O. The buffer manager no longer calls
+`smgrreadv()`: it starts a read with `smgrstartreadv()` and gets the result
+later, through completion callbacks registered on the I/O handle. The
+checksum check moved into such a callback. A hook in `smgrreadv()` alone would
+therefore never see most reads, and the server would verify checksums of
+pages that were never decrypted. This happens with every `io_method`,
+including `sync`, which only executes the same callbacks right away.
+
+So for these versions the patch adds a completion callback of the storage
+manager, `PGAIO_HCB_SMGR_READV`, which `smgrstartreadv()` registers when a
+read hook is set and which calls the hook. Callbacks run in the reverse order
+of registration, which puts it between the callback of `md.c` and that of the
+buffer manager: after the result was turned into a number of blocks, and
+before the checksums are verified. The property described above still holds,
+and `md.c` is still not changed.
+
+Other options were rejected:
+
+- calling the hook from `md_readv_complete()` would put it below the switch
+  of storage managers, in `md.c`;
+- forcing synchronous reads would not help (see above) and would give up the
+  point of asynchronous I/O;
+- a callback registered by the extension itself is not possible: the table
+  of callbacks is fixed in the core (callbacks are referred to by a small
+  number so that they work across processes).
+
+Completion callbacks run in a critical section and may run in another
+process than the one that started the read: an I/O worker, or with
+`io_uring` any backend that collects the completion. That changes the
+contract of the read hook: it gets the `RelFileLocatorBackend` instead of an
+`SMgrRelation` (which need not exist in that process), and it cannot raise
+an error, so it returns the number of blocks it processed and the callback
+turns a failure into an I/O error with its own message. The same API is used
+on PostgreSQL 17, where the hook is simply called at the end of
+`smgrreadv()`, so that an extension needs no version-specific code.
+
+Writes, extension, truncation and the other operations are still synchronous
+in PostgreSQL 18 and 19, and their hooks did not change.
+
 ## What the hooks cover and what they do not
 
-Covered: everything that goes through `smgr.c`. In PostgreSQL 17 that is the
-read and write paths of shared and local buffers, appending blocks, zero
+Covered: everything that goes through `smgr.c`. In PostgreSQL 17 to 19 that
+is the read and write paths of shared and local buffers, appending blocks, zero
 extension, syncing, truncation, creation and removal of relation files.
 
 Not covered, because they do not use the storage manager:
@@ -169,7 +210,7 @@ start when the file is missing or the key does not match.
   and follow-ups). The goal is more general: let a plug-in provide a whole
   storage manager, so the table of managers in `smgr.c` becomes dynamic. The
   discussion raised questions such as how a manager is chosen per tablespace
-  or relation and how redo works. It is not part of PostgreSQL 17.
+  or relation and how redo works. It is not part of PostgreSQL (as of 19).
 - **"RFC: PostgreSQL Storage I/O Transformation Hooks"** (pgsql-hackers,
   December 2025). Closest to this project. It adds hooks in `md.c` for read,
   write and extend, and in the WAL insertion and decoding paths, plus a
