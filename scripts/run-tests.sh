@@ -38,6 +38,10 @@ if [ ! -x "$PREFIX/bin/pg_config" ]; then
     exit 1
 fi
 
+# The tests change directories, so PATH needs an absolute path.
+PREFIX="$(cd "$PREFIX" && pwd)"
+OBJ="$(cd "$OBJ" && pwd)"
+
 # The tests start their own temporary servers; they find the binaries here.
 export PATH="$PREFIX/bin:$PATH"
 export PG_CONFIG="$PREFIX/bin/pg_config"

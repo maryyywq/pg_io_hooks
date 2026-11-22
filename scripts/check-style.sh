@@ -31,6 +31,9 @@ if [ ! -d "$SRC/.git" ] || [ ! -d "$OBJ" ]; then
     echo "error: no prepared source tree in $WORKDIR; run scripts/build-postgres.sh first" >&2
     exit 1
 fi
+SRC="$(cd "$SRC" && pwd)"
+OBJ="$(cd "$OBJ" && pwd)"
+
 if ! command -v shellcheck > /dev/null; then
     echo "error: shellcheck is not installed (see scripts/install-deps-debian.sh)" >&2
     exit 1
