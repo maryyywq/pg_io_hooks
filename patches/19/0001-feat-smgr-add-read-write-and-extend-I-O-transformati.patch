@@ -1,0 +1,366 @@
+From 82f10696dc99202bc46084412bf9b85fc2efd4d7 Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:17:55 +0700
+Subject: [PATCH 1/6] feat(smgr): add read, write and extend I/O transformation
+ hooks
+
+Add smgr_read_hook, smgr_write_hook and smgr_extend_hook, called from
+smgrreadv(), smgrwritev() and smgrextend().  An extension can use them
+to transform block data on its way to and from the storage manager, for
+example to implement transparent page encryption.
+
+The buffer manager reads blocks asynchronously, with smgrstartreadv().
+For those reads the read hook is called from a new AIO completion
+callback, PGAIO_HCB_SMGR_READV, which smgrstartreadv() registers when
+the hook is set.  It runs after the smgr implementation's callback and
+before the buffer manager's, so the checksums are verified after the
+hook.  As it may run in a critical section and in another process, the
+read hook gets the relation file locator instead of an SMgrRelation and
+reports failures through its return value instead of raising an error.
+
+The hooks follow the usual chaining convention.  Page checksums are
+computed before the write hook and verified after the read hook, so
+hooks always see the plaintext page.  With no hook registered the
+behavior is unchanged.
+---
+ src/backend/storage/aio/aio_callback.c |   2 +
+ src/backend/storage/smgr/smgr.c        | 142 +++++++++++++++++++++++++
+ src/include/storage/aio.h              |   2 +
+ src/include/storage/smgr.h             |  87 +++++++++++++++
+ 4 files changed, 233 insertions(+)
+
+diff --git a/src/backend/storage/aio/aio_callback.c b/src/backend/storage/aio/aio_callback.c
+index 206b81f5028..74d12f8a1a7 100644
+--- a/src/backend/storage/aio/aio_callback.c
++++ b/src/backend/storage/aio/aio_callback.c
+@@ -42,6 +42,8 @@ static const PgAioHandleCallbacksEntry aio_handle_cbs[] = {
+ 
+ 	CALLBACK_ENTRY(PGAIO_HCB_MD_READV, aio_md_readv_cb),
+ 
++	CALLBACK_ENTRY(PGAIO_HCB_SMGR_READV, aio_smgr_readv_cb),
++
+ 	CALLBACK_ENTRY(PGAIO_HCB_SHARED_BUFFER_READV, aio_shared_buffer_readv_cb),
+ 
+ 	CALLBACK_ENTRY(PGAIO_HCB_LOCAL_BUFFER_READV, aio_local_buffer_readv_cb),
+diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
+index 5391640d861..050af0f988e 100644
+--- a/src/backend/storage/smgr/smgr.c
++++ b/src/backend/storage/smgr/smgr.c
+@@ -67,6 +67,7 @@
+ #include "lib/ilist.h"
+ #include "miscadmin.h"
+ #include "storage/aio.h"
++#include "storage/aio_internal.h"
+ #include "storage/bufmgr.h"
+ #include "storage/ipc.h"
+ #include "storage/md.h"
+@@ -161,7 +162,17 @@ static HTAB *SMgrRelationHash = NULL;
+ 
+ static dlist_head unpinned_relns;
+ 
++/* Storage I/O transformation hooks, see smgr.h */
++smgr_read_hook_type smgr_read_hook = NULL;
++smgr_write_hook_type smgr_write_hook = NULL;
++smgr_extend_hook_type smgr_extend_hook = NULL;
++
+ /* local function prototypes */
++static PgAioResult smgr_readv_complete(PgAioHandle *ioh,
++									   PgAioResult prior_result,
++									   uint8 cb_data);
++static void smgr_readv_report(PgAioResult result, const PgAioTargetData *td,
++							  int elevel);
+ static void smgrshutdown(int code, Datum arg);
+ static void smgrdestroy(SMgrRelation reln);
+ 
+@@ -175,6 +186,12 @@ const PgAioTargetInfo aio_smgr_target_info = {
+ 	.describe_identity = smgr_aio_describe_identity,
+ };
+ 
++/* AIO callback that calls smgr_read_hook for asynchronous reads */
++const PgAioHandleCallbacks aio_smgr_readv_cb = {
++	.complete_shared = smgr_readv_complete,
++	.report = smgr_readv_report,
++};
++
+ 
+ /*
+  * smgrinit(), smgrshutdown() -- Initialize or shut down storage
+@@ -622,6 +639,10 @@ smgrextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ {
+ 	HOLD_INTERRUPTS();
+ 
++	/* Let an extension transform the block (e.g. encrypt it) */
++	if (smgr_extend_hook)
++		buffer = smgr_extend_hook(reln, forknum, blocknum, buffer);
++
+ 	smgrsw[reln->smgr_which].smgr_extend(reln, forknum, blocknum,
+ 										 buffer, skipFsync);
+ 
+@@ -721,10 +742,24 @@ void
+ smgrreadv(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ 		  void **buffers, BlockNumber nblocks)
+ {
++	BlockNumber done = nblocks;
++
+ 	HOLD_INTERRUPTS();
+ 	smgrsw[reln->smgr_which].smgr_readv(reln, forknum, blocknum, buffers,
+ 										nblocks);
++
++	/* Let an extension transform the blocks (e.g. decrypt them) */
++	if (smgr_read_hook)
++		done = smgr_read_hook(reln->smgr_rlocator, forknum, blocknum,
++							  buffers, nblocks);
+ 	RESUME_INTERRUPTS();
++
++	if (done < nblocks)
++		ereport(ERROR,
++				(errcode(ERRCODE_DATA_CORRUPTED),
++				 errmsg("could not transform block %u in file \"%s\" after reading it",
++						blocknum + done,
++						relpath(reln->smgr_rlocator, forknum).str)));
+ }
+ 
+ /*
+@@ -755,12 +790,114 @@ smgrstartreadv(PgAioHandle *ioh,
+ 			   void **buffers, BlockNumber nblocks)
+ {
+ 	HOLD_INTERRUPTS();
++
++	/*
++	 * Let an extension transform the blocks (e.g. decrypt them) when the read
++	 * completes.  Completion callbacks run in the reverse order of
++	 * registration, so this one runs after the one that the smgr
++	 * implementation registers below (which turns the result into a number of
++	 * blocks), and before the one that the caller registered earlier (which,
++	 * in the buffer manager, verifies the page checksums).
++	 */
++	if (smgr_read_hook)
++		pgaio_io_register_callbacks(ioh, PGAIO_HCB_SMGR_READV, 0);
++
+ 	smgrsw[reln->smgr_which].smgr_startreadv(ioh,
+ 											 reln, forknum, blocknum, buffers,
+ 											 nblocks);
+ 	RESUME_INTERRUPTS();
+ }
+ 
++/*
++ * AIO completion callback for smgrstartreadv(), registered when
++ * smgr_read_hook is set.  It passes the blocks that were read to the hook.
++ *
++ * Like all completion callbacks this runs in a critical section, and possibly
++ * in a different process than the one that started the read, so it has only
++ * the IO handle to work with: the buffers come from its iovecs, and the
++ * relation from its target data.
++ */
++static PgAioResult
++smgr_readv_complete(PgAioHandle *ioh, PgAioResult prior_result, uint8 cb_data)
++{
++	PgAioTargetData *td = pgaio_io_get_target_data(ioh);
++	PgAioResult result = prior_result;
++	RelFileLocatorBackend rlocator;
++	void	   *buffers[PG_IOV_MAX];
++	BlockNumber nblocks = 0;
++	BlockNumber done;
++	struct iovec *iov;
++	int			iovcnt;
++
++	/*
++	 * The smgr implementation has already turned the result into a number of
++	 * blocks and reported any error.  Nothing to do if the read failed, or if
++	 * the hook was not set in this process (it is set by modules loaded with
++	 * shared_preload_libraries, so it is the same in all processes).
++	 */
++	if (prior_result.status == PGAIO_RS_ERROR || smgr_read_hook == NULL)
++		return prior_result;
++
++	/*
++	 * Collect the addresses of the blocks that were read.  Adjacent buffers
++	 * may have been combined into one iovec; after a partial read, only the
++	 * first prior_result.result blocks are valid.
++	 */
++	iovcnt = pgaio_io_get_iovec_length(ioh, &iov);
++	for (int i = 0; i < iovcnt; i++)
++	{
++		for (size_t off = 0; off < iov[i].iov_len; off += BLCKSZ)
++		{
++			if (nblocks >= (BlockNumber) prior_result.result)
++				break;
++			Assert(nblocks < lengthof(buffers));
++			buffers[nblocks++] = (char *) iov[i].iov_base + off;
++		}
++	}
++
++	rlocator.locator = td->smgr.rlocator;
++	rlocator.backend = td->smgr.is_temp ? pgaio_io_get_owner(ioh) :
++		INVALID_PROC_NUMBER;
++
++	done = smgr_read_hook(rlocator, td->smgr.forkNum, td->smgr.blockNum,
++						  buffers, nblocks);
++
++	if (done < nblocks)
++	{
++		/*
++		 * Fail the whole read.  error_data is the offset of the block that
++		 * the hook could not process.  As in md.c, log the problem right
++		 * away; the process that started the read raises the error when it
++		 * looks at the result.
++		 */
++		result.status = PGAIO_RS_ERROR;
++		result.id = PGAIO_HCB_SMGR_READV;
++		result.error_data = done;
++		pgaio_result_report(result, td, LOG_SERVER_ONLY);
++	}
++
++	return result;
++}
++
++/*
++ * AIO error reporting callback for smgr_readv_complete().
++ */
++static void
++smgr_readv_report(PgAioResult result, const PgAioTargetData *td, int elevel)
++{
++	RelPathStr	path;
++
++	path = relpathbackend(td->smgr.rlocator,
++						  td->smgr.is_temp ? MyProcNumber : INVALID_PROC_NUMBER,
++						  td->smgr.forkNum);
++
++	ereport(elevel,
++			errcode(ERRCODE_DATA_CORRUPTED),
++			errmsg("could not transform block %u in file \"%s\" after reading it",
++				   td->smgr.blockNum + result.error_data,
++				   path.str));
++}
++
+ /*
+  * smgrwritev() -- Write the supplied buffers out.
+  *
+@@ -792,6 +929,11 @@ smgrwritev(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ 		   const void **buffers, BlockNumber nblocks, bool skipFsync)
+ {
+ 	HOLD_INTERRUPTS();
++
++	/* Let an extension transform the blocks (e.g. encrypt them) */
++	if (smgr_write_hook)
++		buffers = smgr_write_hook(reln, forknum, blocknum, buffers, nblocks);
++
+ 	smgrsw[reln->smgr_which].smgr_writev(reln, forknum, blocknum,
+ 										 buffers, nblocks, skipFsync);
+ 	RESUME_INTERRUPTS();
+diff --git a/src/include/storage/aio.h b/src/include/storage/aio.h
+index ec543b78409..93048f55f1c 100644
+--- a/src/include/storage/aio.h
++++ b/src/include/storage/aio.h
+@@ -195,6 +195,8 @@ typedef enum PgAioHandleCallbackID
+ 
+ 	PGAIO_HCB_MD_READV,
+ 
++	PGAIO_HCB_SMGR_READV,
++
+ 	PGAIO_HCB_SHARED_BUFFER_READV,
+ 
+ 	PGAIO_HCB_LOCAL_BUFFER_READV,
+diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
+index 09bd42fcf4b..014b1b42768 100644
+--- a/src/include/storage/smgr.h
++++ b/src/include/storage/smgr.h
+@@ -76,6 +76,93 @@ typedef SMgrRelationData *SMgrRelation;
+ 
+ extern PGDLLIMPORT const PgAioTargetInfo aio_smgr_target_info;
+ 
++/*
++ * Storage I/O transformation hooks.
++ *
++ * These hooks let an extension (loaded via shared_preload_libraries) observe
++ * or transform block data on its way to and from the storage manager, for
++ * example to implement transparent page encryption.  Each hook is optional;
++ * when it is NULL, the behavior is identical to a server without hooks.
++ *
++ * Hooks are called from any process that performs relation I/O: backends,
++ * the background writer, the checkpointer, the startup process and, for the
++ * read hook, I/O workers.
++ *
++ * Registration follows the usual PostgreSQL convention: an extension saves
++ * the previous value of the hook variable in _PG_init() and calls it from its
++ * own hook.  Only one extension may actually change data.  Any other hook
++ * must be a pass-through: it calls the previous hook, may observe the data,
++ * and returns what the previous hook returned.
++ *
++ * Checksums are not the hooks' concern.  The core computes a page checksum
++ * before the write hook runs and verifies it after the read hook has run, so
++ * both always see the untransformed (plaintext) page image.
++ *
++ * Except for the read hook, which has stricter rules (see below), errors are
++ * reported with ereport(ERROR).  A hook must not modify the buffers passed to
++ * the write and extend hooks, because they may be shared buffers.
++ */
++
++/*
++ * smgr_read_hook_type: called after "nblocks" blocks starting at "blocknum"
++ * have been read into "buffers", before their checksums are verified and
++ * before the caller looks at them.  The hook may transform the blocks in
++ * place (e.g. decrypt them).
++ *
++ * The hook returns the number of leading blocks it has processed
++ * successfully, which is "nblocks" unless something went wrong.  A smaller
++ * value makes the read fail with an error that names block
++ * "blocknum + result".  A hook that chains to a previous one processes, and
++ * returns at most, the number of blocks that the previous hook returned.
++ *
++ * The hook is called both for synchronous reads (smgrreadv()) and for
++ * asynchronous ones (smgrstartreadv(), which the buffer manager uses).  For
++ * the latter it runs in the completion callback of the read, in a critical
++ * section, and possibly in another process (an I/O worker or another backend)
++ * than the one that started the read.  Therefore the read hook must not raise
++ * ERROR or allocate memory, and may rely only on state set up in _PG_init()
++ * and on shared memory.  For the same reason it receives the relation file
++ * locator rather than an SMgrRelation.  For a partially successful read, the
++ * hook only sees the blocks that were actually read; the caller reads the
++ * rest with another call.
++ */
++typedef BlockNumber (*smgr_read_hook_type) (RelFileLocatorBackend rlocator,
++											ForkNumber forknum,
++											BlockNumber blocknum,
++											void **buffers,
++											BlockNumber nblocks);
++
++/*
++ * smgr_write_hook_type: called by smgrwritev() before the blocks are written.
++ * Returns the array of buffers that must actually be written.  The hook must
++ * return the input array unchanged if it does not transform the data.
++ *
++ * Otherwise, the returned array and the buffers it points to are owned by the
++ * hook, must be aligned to PG_IO_ALIGN_SIZE, and must stay valid until the
++ * next call of any smgr write hook in the same process.  The hook must be
++ * prepared for up to MAX_IO_COMBINE_LIMIT blocks per call.  Memory should be
++ * allocated in advance (e.g. in _PG_init()) rather than in the hook.
++ */
++typedef const void **(*smgr_write_hook_type) (SMgrRelation reln,
++											  ForkNumber forknum,
++											  BlockNumber blocknum,
++											  const void **buffers,
++											  BlockNumber nblocks);
++
++/*
++ * smgr_extend_hook_type: the single-block counterpart of the write hook,
++ * called by smgrextend().  The same rules for the returned buffer apply.
++ */
++typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
++											  ForkNumber forknum,
++											  BlockNumber blocknum,
++											  const void *buffer);
++
++extern PGDLLIMPORT smgr_read_hook_type smgr_read_hook;
++extern PGDLLIMPORT const PgAioHandleCallbacks aio_smgr_readv_cb;
++extern PGDLLIMPORT smgr_write_hook_type smgr_write_hook;
++extern PGDLLIMPORT smgr_extend_hook_type smgr_extend_hook;
++
+ extern void smgrinit(void);
+ extern SMgrRelation smgropen(RelFileLocator rlocator, ProcNumber backend);
+ extern bool smgrexists(SMgrRelation reln, ForkNumber forknum);
+
+base-commit: 5c839a2a08b9b87a349be97371fac6c5a2873b10
+-- 
+2.53.0
+

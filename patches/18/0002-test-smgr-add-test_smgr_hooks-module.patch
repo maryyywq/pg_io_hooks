@@ -1,0 +1,378 @@
+From b376e1370883300230f1519652cf2411a65782c8 Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:21:06 +0700
+Subject: [PATCH 2/6] test(smgr): add test_smgr_hooks module
+
+Add a test module that installs the smgr read, write and extend hooks and
+XORs the blocks of user relations with a per-block key.  The TAP test
+checks that data is stored transformed, read back correctly, survives
+crash recovery and is rejected when the module is not loaded.
+---
+ src/test/modules/Makefile                     |   1 +
+ src/test/modules/meson.build                  |   1 +
+ src/test/modules/test_smgr_hooks/Makefile     |  21 +++
+ src/test/modules/test_smgr_hooks/README       |  14 ++
+ src/test/modules/test_smgr_hooks/meson.build  |  28 ++++
+ .../test_smgr_hooks/t/001_transform.pl        |  76 +++++++++
+ .../modules/test_smgr_hooks/test_smgr_hooks.c | 158 ++++++++++++++++++
+ 7 files changed, 299 insertions(+)
+ create mode 100644 src/test/modules/test_smgr_hooks/Makefile
+ create mode 100644 src/test/modules/test_smgr_hooks/README
+ create mode 100644 src/test/modules/test_smgr_hooks/meson.build
+ create mode 100644 src/test/modules/test_smgr_hooks/t/001_transform.pl
+ create mode 100644 src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+
+diff --git a/src/test/modules/Makefile b/src/test/modules/Makefile
+index 1ca50975d9c..e0b5dccf388 100644
+--- a/src/test/modules/Makefile
++++ b/src/test/modules/Makefile
+@@ -41,6 +41,7 @@ SUBDIRS = \
+ 		  test_rls_hooks \
+ 		  test_shm_mq \
+ 		  test_slru \
++		  test_smgr_hooks \
+ 		  test_tidstore \
+ 		  unsafe_tests \
+ 		  worker_spi \
+diff --git a/src/test/modules/meson.build b/src/test/modules/meson.build
+index 543a9ea49aa..afb8568ef85 100644
+--- a/src/test/modules/meson.build
++++ b/src/test/modules/meson.build
+@@ -41,6 +41,7 @@ subdir('test_resowner')
+ subdir('test_rls_hooks')
+ subdir('test_shm_mq')
+ subdir('test_slru')
++subdir('test_smgr_hooks')
+ subdir('test_tidstore')
+ subdir('typcache')
+ subdir('unsafe_tests')
+diff --git a/src/test/modules/test_smgr_hooks/Makefile b/src/test/modules/test_smgr_hooks/Makefile
+new file mode 100644
+index 00000000000..455ca9da82f
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/Makefile
+@@ -0,0 +1,21 @@
++# src/test/modules/test_smgr_hooks/Makefile
++
++MODULES = test_smgr_hooks
++PGFILEDESC = "test_smgr_hooks - test module for smgr I/O transformation hooks"
++
++TAP_TESTS = 1
++
++# The tests need "shared_preload_libraries=test_smgr_hooks", which typical
++# installcheck users do not have.
++NO_INSTALLCHECK = 1
++
++ifdef USE_PGXS
++PG_CONFIG = pg_config
++PGXS := $(shell $(PG_CONFIG) --pgxs)
++include $(PGXS)
++else
++subdir = src/test/modules/test_smgr_hooks
++top_builddir = ../../../..
++include $(top_builddir)/src/Makefile.global
++include $(top_srcdir)/contrib/contrib-global.mk
++endif
+diff --git a/src/test/modules/test_smgr_hooks/README b/src/test/modules/test_smgr_hooks/README
+new file mode 100644
+index 00000000000..6b5847e253f
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/README
+@@ -0,0 +1,14 @@
++test_smgr_hooks
++===============
++
++Test module for the smgr I/O transformation hooks (smgr_read_hook,
++smgr_write_hook and smgr_extend_hook).
++
++The module XORs the blocks of user relations with a per-block key byte when
++they are written and reverses it when they are read.  This is not a cipher;
++it only makes the on-disk image differ from the in-memory image so that the
++tests can tell whether the hooks are called on every path.
++
++The module must be loaded with shared_preload_libraries, and only
++relations created after initdb (relNumber >= FirstNormalObjectId) are
++transformed, because initdb runs without the module.
+diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
+new file mode 100644
+index 00000000000..7256b7503a3
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/meson.build
+@@ -0,0 +1,28 @@
++# Copyright (c) 2024, PostgreSQL Global Development Group
++
++test_smgr_hooks_sources = files(
++  'test_smgr_hooks.c',
++)
++
++if host_system == 'windows'
++  test_smgr_hooks_sources += rc_lib_gen.process(win32ver_rc, extra_args: [
++    '--NAME', 'test_smgr_hooks',
++    '--FILEDESC', 'test_smgr_hooks - test module for smgr I/O transformation hooks',])
++endif
++
++test_smgr_hooks = shared_module('test_smgr_hooks',
++  test_smgr_hooks_sources,
++  kwargs: pg_test_mod_args,
++)
++test_install_libs += test_smgr_hooks
++
++tests += {
++  'name': 'test_smgr_hooks',
++  'sd': meson.current_source_dir(),
++  'bd': meson.current_build_dir(),
++  'tap': {
++    'tests': [
++      't/001_transform.pl',
++    ],
++  },
++}
+diff --git a/src/test/modules/test_smgr_hooks/t/001_transform.pl b/src/test/modules/test_smgr_hooks/t/001_transform.pl
+new file mode 100644
+index 00000000000..b39b2e8f670
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/t/001_transform.pl
+@@ -0,0 +1,76 @@
++# Copyright (c) 2024, PostgreSQL Global Development Group
++
++# Test the smgr I/O transformation hooks through test_smgr_hooks: the data
++# must be stored transformed, read back correctly, survive crash recovery,
++# and be unreadable without the module.
++
++use strict;
++use warnings FATAL => 'all';
++use PostgreSQL::Test::Cluster;
++use PostgreSQL::Test::Utils;
++use Test::More;
++
++my $marker = 'smgr-hooks-plaintext-marker';
++
++# Return true if the relation's main fork file contains the marker as is.
++sub raw_has_marker
++{
++	my ($node, $rel) = @_;
++	my $path = $node->safe_psql('postgres', "SELECT pg_relation_filepath('$rel')");
++	my $data = slurp_file($node->data_dir . '/' . $path);
++	return index($data, $marker) >= 0;
++}
++
++my $setup = qq{
++CREATE TABLE t (id int, v text);
++INSERT INTO t SELECT g, '$marker ' || g FROM generate_series(1, 2000) g;
++CREATE INDEX t_v ON t (v);
++CHECKPOINT;
++};
++
++# Baseline: without the module the marker is visible in the files, so the
++# checks below are meaningful.
++my $plain = PostgreSQL::Test::Cluster->new('plain');
++$plain->init(extra => ['--data-checksums']);
++$plain->start;
++$plain->safe_psql('postgres', $setup);
++ok(raw_has_marker($plain, 't'), 'baseline: table file contains the marker');
++ok(raw_has_marker($plain, 't_v'), 'baseline: index file contains the marker');
++$plain->stop;
++
++# With the module.
++my $node = PostgreSQL::Test::Cluster->new('hooked');
++$node->init(extra => ['--data-checksums']);
++$node->append_conf('postgresql.conf', "shared_preload_libraries = 'test_smgr_hooks'");
++$node->start;
++$node->safe_psql('postgres', $setup);
++
++ok(!raw_has_marker($node, 't'), 'table file does not contain the marker');
++ok(!raw_has_marker($node, 't_v'), 'index file does not contain the marker');
++
++is($node->safe_psql('postgres', "SELECT count(*) FROM t WHERE v LIKE '$marker%'"),
++	'2000', 'rows are read back correctly');
++
++# Evict everything from shared buffers by restarting, then read again.
++$node->restart;
++is($node->safe_psql('postgres', "SELECT sum(id) FROM t"),
++	'2001000', 'rows are read back correctly after restart');
++
++# Crash recovery: replayed full-page images go through the same hooks.
++$node->safe_psql('postgres', "INSERT INTO t SELECT g, '$marker ' || g FROM generate_series(2001, 3000) g");
++$node->stop('immediate');
++$node->start;
++is($node->safe_psql('postgres', "SELECT count(*) FROM t"),
++	'3000', 'rows survive crash recovery');
++ok(!raw_has_marker($node, 't'), 'table file still does not contain the marker');
++$node->stop;
++
++# Without the module the transformed pages must be rejected.
++$node->append_conf('postgresql.conf', "shared_preload_libraries = ''");
++$node->start;
++my ($ret, $stdout, $stderr) = $node->psql('postgres', "SELECT count(*) FROM t");
++isnt($ret, 0, 'reading transformed data without the module fails');
++like($stderr, qr/invalid page|page verification failed/, 'failure is reported as a bad page');
++$node->stop;
++
++done_testing();
+diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+new file mode 100644
+index 00000000000..1dac56147d7
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+@@ -0,0 +1,158 @@
++/*--------------------------------------------------------------------------
++ *
++ * test_smgr_hooks.c
++ *		Test module for the smgr I/O transformation hooks.
++ *
++ * The module XORs every non-empty block of a user relation with a key byte
++ * derived from the block number when it is written, and does the reverse
++ * after it is read.  All-zero blocks are left alone in both directions: they
++ * are produced by relation extension without any hook call and must be read
++ * back as empty pages.
++ *
++ * Portions Copyright (c) 1996-2024, PostgreSQL Global Development Group
++ * Portions Copyright (c) 1994, Regents of the University of California
++ *
++ * IDENTIFICATION
++ *		src/test/modules/test_smgr_hooks/test_smgr_hooks.c
++ *
++ * -------------------------------------------------------------------------
++ */
++
++#include "postgres.h"
++
++#include "access/transam.h"
++#include "fmgr.h"
++#include "miscadmin.h"
++#include "storage/bufmgr.h"
++#include "storage/smgr.h"
++
++PG_MODULE_MAGIC;
++
++void		_PG_init(void);
++
++/* Previous hook values, to chain to them */
++static smgr_read_hook_type prev_read_hook = NULL;
++static smgr_write_hook_type prev_write_hook = NULL;
++static smgr_extend_hook_type prev_extend_hook = NULL;
++
++/*
++ * Output buffers of the write and extend hooks.  They are static, so that no
++ * memory is allocated while writing, and aligned for direct I/O.
++ */
++static PGIOAlignedBlock write_blocks[MAX_IO_COMBINE_LIMIT];
++static const void *write_ptrs[MAX_IO_COMBINE_LIMIT];
++static PGIOAlignedBlock extend_block;
++
++/* Only transform relations created after initdb, which ran without us. */
++static bool
++is_transformed(RelFileLocator rlocator)
++{
++	return rlocator.relNumber >= FirstNormalObjectId;
++}
++
++static bool
++block_is_zero(const void *block)
++{
++	const size_t *p = (const size_t *) block;
++
++	for (size_t i = 0; i < BLCKSZ / sizeof(size_t); i++)
++	{
++		if (p[i] != 0)
++			return false;
++	}
++	return true;
++}
++
++/* XOR is its own inverse, so the same function encodes and decodes. */
++static void
++xor_block(const void *src, void *dst, BlockNumber blocknum)
++{
++	const unsigned char *s = (const unsigned char *) src;
++	unsigned char *d = (unsigned char *) dst;
++	unsigned char key = (unsigned char) (0x5A + blocknum);
++
++	for (int i = 0; i < BLCKSZ; i++)
++		d[i] = s[i] ^ key;
++}
++
++/*
++ * The read hook may run in a critical section and in another process than
++ * the one that started the read (see smgr.h), so it only uses its arguments.
++ */
++static BlockNumber
++test_read_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
++			   BlockNumber blocknum, void **buffers, BlockNumber nblocks)
++{
++	if (prev_read_hook)
++		nblocks = prev_read_hook(rlocator, forknum, blocknum, buffers, nblocks);
++
++	if (!is_transformed(rlocator.locator))
++		return nblocks;
++
++	for (BlockNumber i = 0; i < nblocks; i++)
++	{
++		if (block_is_zero(buffers[i]))
++			continue;
++		xor_block(buffers[i], buffers[i], blocknum + i);
++	}
++	return nblocks;
++}
++
++static const void **
++test_write_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
++				const void **buffers, BlockNumber nblocks)
++{
++	if (prev_write_hook)
++		buffers = prev_write_hook(reln, forknum, blocknum, buffers, nblocks);
++
++	if (!is_transformed(reln->smgr_rlocator.locator))
++		return buffers;
++
++	if (nblocks > MAX_IO_COMBINE_LIMIT)
++		elog(ERROR, "too many blocks in one write: %u", nblocks);
++
++	for (BlockNumber i = 0; i < nblocks; i++)
++	{
++		if (block_is_zero(buffers[i]))
++			write_ptrs[i] = buffers[i];
++		else
++		{
++			xor_block(buffers[i], write_blocks[i].data, blocknum + i);
++			write_ptrs[i] = write_blocks[i].data;
++		}
++	}
++	return write_ptrs;
++}
++
++static const void *
++test_extend_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
++				 const void *buffer)
++{
++	if (prev_extend_hook)
++		buffer = prev_extend_hook(reln, forknum, blocknum, buffer);
++
++	if (!is_transformed(reln->smgr_rlocator.locator) || block_is_zero(buffer))
++		return buffer;
++
++	xor_block(buffer, extend_block.data, blocknum);
++	return extend_block.data;
++}
++
++void
++_PG_init(void)
++{
++	/*
++	 * The on-disk format depends on the hooks, so they must be active in
++	 * every process from the start.
++	 */
++	if (!process_shared_preload_libraries_in_progress)
++		ereport(ERROR,
++				(errmsg("test_smgr_hooks must be loaded via shared_preload_libraries")));
++
++	prev_read_hook = smgr_read_hook;
++	smgr_read_hook = test_read_hook;
++	prev_write_hook = smgr_write_hook;
++	smgr_write_hook = test_write_hook;
++	prev_extend_hook = smgr_extend_hook;
++	smgr_extend_hook = test_extend_hook;
++}
+-- 
+2.53.0
+

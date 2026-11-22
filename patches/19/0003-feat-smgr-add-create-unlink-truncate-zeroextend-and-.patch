@@ -1,0 +1,173 @@
+From 8cf9ad78e94447920345a935dd1764f294f394dc Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:25:11 +0700
+Subject: [PATCH 3/6] feat(smgr): add create, unlink, truncate, zeroextend and
+ sync hooks
+
+Add notification hooks for relation-level smgr operations:
+smgr_zeroextend_hook, smgr_sync_hook, smgr_truncate_hook,
+smgr_create_hook and smgr_unlink_hook.  They cannot change data and
+chain like the read, write and extend hooks.  smgrdosyncall() calls the
+sync hook itself because it bypasses smgrimmedsync().
+---
+ src/backend/storage/smgr/smgr.c | 30 +++++++++++++++++++++
+ src/include/storage/smgr.h      | 47 +++++++++++++++++++++++++++++++++
+ 2 files changed, 77 insertions(+)
+
+diff --git a/src/backend/storage/smgr/smgr.c b/src/backend/storage/smgr/smgr.c
+index 050af0f988e..3914d86eb83 100644
+--- a/src/backend/storage/smgr/smgr.c
++++ b/src/backend/storage/smgr/smgr.c
+@@ -166,6 +166,11 @@ static dlist_head unpinned_relns;
+ smgr_read_hook_type smgr_read_hook = NULL;
+ smgr_write_hook_type smgr_write_hook = NULL;
+ smgr_extend_hook_type smgr_extend_hook = NULL;
++smgr_zeroextend_hook_type smgr_zeroextend_hook = NULL;
++smgr_sync_hook_type smgr_sync_hook = NULL;
++smgr_truncate_hook_type smgr_truncate_hook = NULL;
++smgr_create_hook_type smgr_create_hook = NULL;
++smgr_unlink_hook_type smgr_unlink_hook = NULL;
+ 
+ /* local function prototypes */
+ static PgAioResult smgr_readv_complete(PgAioHandle *ioh,
+@@ -499,6 +504,9 @@ smgrcreate(SMgrRelation reln, ForkNumber forknum, bool isRedo)
+ {
+ 	HOLD_INTERRUPTS();
+ 	smgrsw[reln->smgr_which].smgr_create(reln, forknum, isRedo);
++
++	if (smgr_create_hook)
++		smgr_create_hook(reln, forknum, isRedo);
+ 	RESUME_INTERRUPTS();
+ }
+ 
+@@ -534,7 +542,11 @@ smgrdosyncall(SMgrRelation *rels, int nrels)
+ 		for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
+ 		{
+ 			if (smgrsw[which].smgr_exists(rels[i], forknum))
++			{
++				if (smgr_sync_hook)
++					smgr_sync_hook(rels[i], forknum, true);
+ 				smgrsw[which].smgr_immedsync(rels[i], forknum);
++			}
+ 		}
+ 	}
+ 
+@@ -615,7 +627,11 @@ smgrdounlinkall(SMgrRelation *rels, int nrels, bool isRedo)
+ 		int			which = rels[i]->smgr_which;
+ 
+ 		for (forknum = 0; forknum <= MAX_FORKNUM; forknum++)
++		{
++			if (smgr_unlink_hook)
++				smgr_unlink_hook(rlocators[i], forknum, isRedo);
+ 			smgrsw[which].smgr_unlink(rlocators[i], forknum, isRedo);
++		}
+ 	}
+ 
+ 	pfree(rlocators);
+@@ -672,6 +688,9 @@ smgrzeroextend(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ {
+ 	HOLD_INTERRUPTS();
+ 
++	if (smgr_zeroextend_hook)
++		smgr_zeroextend_hook(reln, forknum, blocknum, nblocks);
++
+ 	smgrsw[reln->smgr_which].smgr_zeroextend(reln, forknum, blocknum,
+ 											 nblocks, skipFsync);
+ 
+@@ -1043,6 +1062,9 @@ smgrtruncate(SMgrRelation reln, ForkNumber *forknum, int nforks,
+ 		/* Make the cached size invalid if we encounter an error. */
+ 		reln->smgr_cached_nblocks[forknum[i]] = InvalidBlockNumber;
+ 
++		if (smgr_truncate_hook)
++			smgr_truncate_hook(reln, forknum[i], old_nblocks[i], nblocks[i]);
++
+ 		smgrsw[reln->smgr_which].smgr_truncate(reln, forknum[i],
+ 											   old_nblocks[i], nblocks[i]);
+ 
+@@ -1082,6 +1104,10 @@ void
+ smgrregistersync(SMgrRelation reln, ForkNumber forknum)
+ {
+ 	HOLD_INTERRUPTS();
++
++	if (smgr_sync_hook)
++		smgr_sync_hook(reln, forknum, false);
++
+ 	smgrsw[reln->smgr_which].smgr_registersync(reln, forknum);
+ 	RESUME_INTERRUPTS();
+ }
+@@ -1116,6 +1142,10 @@ void
+ smgrimmedsync(SMgrRelation reln, ForkNumber forknum)
+ {
+ 	HOLD_INTERRUPTS();
++
++	if (smgr_sync_hook)
++		smgr_sync_hook(reln, forknum, true);
++
+ 	smgrsw[reln->smgr_which].smgr_immedsync(reln, forknum);
+ 	RESUME_INTERRUPTS();
+ }
+diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
+index 014b1b42768..f2c8457e65f 100644
+--- a/src/include/storage/smgr.h
++++ b/src/include/storage/smgr.h
+@@ -158,10 +158,57 @@ typedef const void *(*smgr_extend_hook_type) (SMgrRelation reln,
+ 											  BlockNumber blocknum,
+ 											  const void *buffer);
+ 
++/*
++ * Notification hooks.  These cannot change data; they let an extension watch
++ * relation-level operations (for example for auditing, or to maintain
++ * auxiliary files).  Each one is called with the same arguments as the
++ * smgr function it belongs to, and chains like the hooks above.
++ *
++ * smgr_zeroextend_hook: called before smgrzeroextend() adds "nblocks" zero
++ * blocks starting at "blocknum".  The new blocks are all zeroes and are not
++ * passed through the extend or write hooks.
++ *
++ * smgr_sync_hook: called before a fork is synced to disk by smgrimmedsync(),
++ * smgrdosyncall() (immediate = true) or queued for sync at the next
++ * checkpoint by smgrregistersync() (immediate = false).
++ *
++ * smgr_truncate_hook: called before a fork is truncated from "old_nblocks"
++ * to "nblocks" blocks.  smgrtruncate() is normally called in a critical
++ * section, so this hook must not allocate memory or raise ERROR.
++ *
++ * smgr_create_hook: called after the storage of a fork has been created.
++ * "isRedo" is true when called during WAL replay.
++ *
++ * smgr_unlink_hook: called before the files of a fork are removed, once for
++ * every possible fork number whether or not the fork exists.  Unlinking
++ * happens after the transaction outcome has been decided, so this hook must
++ * not raise ERROR; use WARNING instead.  Only the relation identifier is
++ * available, because the SMgrRelation is already closed.
++ */
++typedef void (*smgr_zeroextend_hook_type) (SMgrRelation reln,
++										   ForkNumber forknum,
++										   BlockNumber blocknum,
++										   int nblocks);
++typedef void (*smgr_sync_hook_type) (SMgrRelation reln, ForkNumber forknum,
++									 bool immediate);
++typedef void (*smgr_truncate_hook_type) (SMgrRelation reln,
++										 ForkNumber forknum,
++										 BlockNumber old_nblocks,
++										 BlockNumber nblocks);
++typedef void (*smgr_create_hook_type) (SMgrRelation reln, ForkNumber forknum,
++									   bool isRedo);
++typedef void (*smgr_unlink_hook_type) (RelFileLocatorBackend rlocator,
++									   ForkNumber forknum, bool isRedo);
++
+ extern PGDLLIMPORT smgr_read_hook_type smgr_read_hook;
+ extern PGDLLIMPORT const PgAioHandleCallbacks aio_smgr_readv_cb;
+ extern PGDLLIMPORT smgr_write_hook_type smgr_write_hook;
+ extern PGDLLIMPORT smgr_extend_hook_type smgr_extend_hook;
++extern PGDLLIMPORT smgr_zeroextend_hook_type smgr_zeroextend_hook;
++extern PGDLLIMPORT smgr_sync_hook_type smgr_sync_hook;
++extern PGDLLIMPORT smgr_truncate_hook_type smgr_truncate_hook;
++extern PGDLLIMPORT smgr_create_hook_type smgr_create_hook;
++extern PGDLLIMPORT smgr_unlink_hook_type smgr_unlink_hook;
+ 
+ extern void smgrinit(void);
+ extern SMgrRelation smgropen(RelFileLocator rlocator, ProcNumber backend);
+-- 
+2.53.0
+
