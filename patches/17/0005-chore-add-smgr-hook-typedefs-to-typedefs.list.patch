@@ -1,7 +1,7 @@
-From 5067b6318a581c1c4338699d26f7871add9a4a01 Mon Sep 17 00:00:00 2001
+From dfdaa83c0d59d25d26dc2876ad474df42e597f29 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:27:47 +0700
-Subject: [PATCH 5/5] chore: add smgr hook typedefs to typedefs.list
+Subject: [PATCH 5/6] chore: add smgr hook typedefs to typedefs.list
 
 ---
  src/tools/pgindent/typedefs.list | 8 ++++++++

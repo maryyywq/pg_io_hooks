@@ -103,27 +103,34 @@ static PGIOAlignedBlock extend_block;
  * number alone, which makes it identical on the write and read side.
  */
 static bool
-is_encrypted(SMgrRelation reln)
+is_encrypted(RelFileLocator rlocator)
 {
-	return reln->smgr_rlocator.locator.relNumber >= PAGE_CIPHER_FIRST_RELNUMBER;
+	return rlocator.relNumber >= PAGE_CIPHER_FIRST_RELNUMBER;
 }
 
 /*
- * smgr_read_hook: decrypt the blocks that smgrreadv() has just read.
+ * smgr_read_hook: decrypt the blocks that have just been read.
  *
- * This runs before the caller verifies the page checksum, so the checksum is
- * checked against the decrypted page, as in a server without this module.
+ * This runs before the page checksums are verified, so they are checked
+ * against the decrypted pages, as in a server without this module.
+ *
+ * On PostgreSQL 18 and later this usually runs in the completion callback of
+ * an asynchronous read: in a critical section, and possibly in an I/O worker
+ * or in another backend.  So it must not raise ERROR or allocate memory.  It
+ * only needs the cipher contexts, which every process inherits from the
+ * postmaster.  A failure is reported by returning the number of blocks
+ * decrypted so far; the core then fails the read.
  */
-static void
-crypt_read_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
-				void **buffers, BlockNumber nblocks)
+static BlockNumber
+crypt_read_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
+				BlockNumber blocknum, void **buffers, BlockNumber nblocks)
 {
 	/* Modules loaded before us get to see the data first. */
 	if (prev_read_hook)
-		prev_read_hook(reln, forknum, blocknum, buffers, nblocks);
+		nblocks = prev_read_hook(rlocator, forknum, blocknum, buffers, nblocks);
 
-	if (!is_encrypted(reln))
-		return;
+	if (!is_encrypted(rlocator.locator))
+		return nblocks;
 
 	for (BlockNumber i = 0; i < nblocks; i++)
 	{
@@ -136,14 +143,11 @@ crypt_read_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 			continue;
 
 		/* In-place: the read buffers are ours to modify. */
-		if (!page_cipher_apply(&cipher, false,
-							   reln->smgr_rlocator.locator.relNumber,
+		if (!page_cipher_apply(&cipher, false, rlocator.locator.relNumber,
 							   blocknum + i, buffers[i], buffers[i]))
-			ereport(ERROR,
-					(errmsg("pg_page_crypt: could not decrypt block %u of relation file %u",
-							blocknum + i,
-							reln->smgr_rlocator.locator.relNumber)));
+			return i;
 	}
+	return nblocks;
 }
 
 /*
@@ -159,7 +163,7 @@ crypt_write_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (prev_write_hook)
 		buffers = prev_write_hook(reln, forknum, blocknum, buffers, nblocks);
 
-	if (!is_encrypted(reln))
+	if (!is_encrypted(reln->smgr_rlocator.locator))
 		return buffers;
 
 	if (nblocks > MAX_IO_COMBINE_LIMIT)
@@ -200,7 +204,8 @@ crypt_extend_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
 	if (prev_extend_hook)
 		buffer = prev_extend_hook(reln, forknum, blocknum, buffer);
 
-	if (!is_encrypted(reln) || page_cipher_block_is_zero(buffer))
+	if (!is_encrypted(reln->smgr_rlocator.locator) ||
+		page_cipher_block_is_zero(buffer))
 		return buffer;
 
 	if (!page_cipher_apply(&cipher, true,
