@@ -7,7 +7,7 @@ noted, deliberate.
 
 - **PostgreSQL 17, 18 and 19 only.** The patches for each version apply to
   the base commit named in [patches/README.md](../patches/README.md) (a
-  `REL_17_STABLE` commit, `REL_18_7` and `REL_19_0`); other minor releases
+  `REL_17_12`, `REL_18_7` and `REL_19_0`); other minor releases
   may need a rebase.
 - **The read hook cannot raise errors and runs in other processes.** On
   PostgreSQL 18 and later it runs in an I/O completion callback (critical

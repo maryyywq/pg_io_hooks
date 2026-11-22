@@ -1,4 +1,4 @@
-From 82f10696dc99202bc46084412bf9b85fc2efd4d7 Mon Sep 17 00:00:00 2001
+From 1c995fb679b5c6068d860d3997e63848cd984fa7 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:17:55 +0700
 Subject: [PATCH 1/6] feat(smgr): add read, write and extend I/O transformation
@@ -26,8 +26,8 @@ behavior is unchanged.
  src/backend/storage/aio/aio_callback.c |   2 +
  src/backend/storage/smgr/smgr.c        | 142 +++++++++++++++++++++++++
  src/include/storage/aio.h              |   2 +
- src/include/storage/smgr.h             |  87 +++++++++++++++
- 4 files changed, 233 insertions(+)
+ src/include/storage/smgr.h             | 100 +++++++++++++++++
+ 4 files changed, 246 insertions(+)
 
 diff --git a/src/backend/storage/aio/aio_callback.c b/src/backend/storage/aio/aio_callback.c
 index 206b81f5028..74d12f8a1a7 100644
@@ -262,10 +262,10 @@ index ec543b78409..93048f55f1c 100644
  
  	PGAIO_HCB_LOCAL_BUFFER_READV,
 diff --git a/src/include/storage/smgr.h b/src/include/storage/smgr.h
-index 09bd42fcf4b..014b1b42768 100644
+index 09bd42fcf4b..1ab63e20b0a 100644
 --- a/src/include/storage/smgr.h
 +++ b/src/include/storage/smgr.h
-@@ -76,6 +76,93 @@ typedef SMgrRelationData *SMgrRelation;
+@@ -76,6 +76,106 @@ typedef SMgrRelationData *SMgrRelation;
  
  extern PGDLLIMPORT const PgAioTargetInfo aio_smgr_target_info;
  
@@ -295,6 +295,19 @@ index 09bd42fcf4b..014b1b42768 100644
 + * reported with ereport(ERROR).  A hook must not modify the buffers passed to
 + * the write and extend hooks, because they may be shared buffers.
 + */
++
++/*
++ * Version of the hooks API, for extensions to check at compile time:
++ *
++ *   #if !defined(SMGR_HOOKS_API_VERSION) || SMGR_HOOKS_API_VERSION < 2
++ *   #error "this extension needs a server with the smgr hooks"
++ *   #endif
++ *
++ * Version 2 is the API described here.  (Version 1 differed only in the
++ * read hook, which took an SMgrRelation, returned nothing and could raise
++ * ERROR; it was never released.)
++ */
++#define SMGR_HOOKS_API_VERSION 2
 +
 +/*
 + * smgr_read_hook_type: called after "nblocks" blocks starting at "blocknum"

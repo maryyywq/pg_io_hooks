@@ -1,4 +1,4 @@
-From 129638d8925adb828386d98d4efab9b23364e27c Mon Sep 17 00:00:00 2001
+From 0cae1e74b3890c39f0cf686711092aea5de0f590 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Fri, 13 Nov 2026 00:25:11 +0700
 Subject: [PATCH 4/6] test(smgr): cover notification hooks in test_smgr_hooks
@@ -14,7 +14,7 @@ hook is called.
  create mode 100644 src/test/modules/test_smgr_hooks/t/002_events.pl
 
 diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
-index 7256b7503a3..4804a0dbce1 100644
+index ce39b4cabbf..90786dce3f5 100644
 --- a/src/test/modules/test_smgr_hooks/meson.build
 +++ b/src/test/modules/test_smgr_hooks/meson.build
 @@ -23,6 +23,7 @@ tests += {
@@ -27,11 +27,11 @@ index 7256b7503a3..4804a0dbce1 100644
  }
 diff --git a/src/test/modules/test_smgr_hooks/t/002_events.pl b/src/test/modules/test_smgr_hooks/t/002_events.pl
 new file mode 100644
-index 00000000000..18b3bad49b9
+index 00000000000..dbb3a6878cf
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/t/002_events.pl
 @@ -0,0 +1,72 @@
-+# Copyright (c) 2024, PostgreSQL Global Development Group
++# Copyright (c) 2025, PostgreSQL Global Development Group
 +
 +# Test the smgr notification hooks (create, zeroextend, sync, truncate,
 +# unlink) through the server log of test_smgr_hooks.
@@ -104,7 +104,7 @@ index 00000000000..18b3bad49b9
 +$node->stop;
 +done_testing();
 diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
-index 1dac56147d7..8a19b421562 100644
+index 6b57ca2101f..a6f0dc8a78f 100644
 --- a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 +++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 @@ -25,6 +25,7 @@

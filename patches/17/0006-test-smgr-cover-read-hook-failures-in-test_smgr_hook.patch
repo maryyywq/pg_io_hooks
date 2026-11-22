@@ -1,4 +1,4 @@
-From 0d53a5bd45a794f42f3d4ed51c85d3c873281452 Mon Sep 17 00:00:00 2001
+From 8c4af243e8ef88e0a937376e34713f8163d3d830 Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Sun, 22 Nov 2026 21:32:06 +0700
 Subject: [PATCH 6/6] test(smgr): cover read hook failures in test_smgr_hooks

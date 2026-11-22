@@ -27,7 +27,7 @@ proves with two extensions that they are enough.
 
 | PostgreSQL | Patches based on | `io_method` tested |
 |------------|------------------|--------------------|
-| 17 | a `REL_17_STABLE` commit | (no asynchronous I/O) |
+| 17 | 17.12 | (no asynchronous I/O) |
 | 18 | 18.7 | `sync`, `worker`, `io_uring` |
 | 19 | 19.0 | `sync`, `worker`, `io_uring` |
 

@@ -1,4 +1,4 @@
-From 790e343e85f3faa8f8222be4294b1910fea16350 Mon Sep 17 00:00:00 2001
+From fb91b1e627251308459b01c0adbd1652d23d5eac Mon Sep 17 00:00:00 2001
 From: Maria <mk902589@yandex.ru>
 Date: Sun, 22 Nov 2026 21:32:06 +0700
 Subject: [PATCH 6/6] test(smgr): cover read hook failures in test_smgr_hooks
@@ -32,7 +32,7 @@ index 6b5847e253f..fe8ca925e03 100644
  relations created after initdb (relNumber >= FirstNormalObjectId) are
  transformed, because initdb runs without the module.
 diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
-index 4804a0dbce1..fee8e7d42f6 100644
+index 90786dce3f5..68db3136df1 100644
 --- a/src/test/modules/test_smgr_hooks/meson.build
 +++ b/src/test/modules/test_smgr_hooks/meson.build
 @@ -24,6 +24,7 @@ tests += {
@@ -45,11 +45,11 @@ index 4804a0dbce1..fee8e7d42f6 100644
  }
 diff --git a/src/test/modules/test_smgr_hooks/t/003_read_errors.pl b/src/test/modules/test_smgr_hooks/t/003_read_errors.pl
 new file mode 100644
-index 00000000000..eaa73ca128b
+index 00000000000..92d123d3313
 --- /dev/null
 +++ b/src/test/modules/test_smgr_hooks/t/003_read_errors.pl
 @@ -0,0 +1,60 @@
-+# Copyright (c) 2024, PostgreSQL Global Development Group
++# Copyright (c) 2025, PostgreSQL Global Development Group
 +
 +# Test that a failure reported by the read hook makes the read fail with an
 +# error, and that the data can be read again once the hook stops failing.
@@ -110,7 +110,7 @@ index 00000000000..eaa73ca128b
 +
 +done_testing();
 diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
-index 8a19b421562..f1501870087 100644
+index a6f0dc8a78f..f46248501fd 100644
 --- a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 +++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
 @@ -44,6 +44,9 @@ static smgr_unlink_hook_type prev_unlink_hook = NULL;
