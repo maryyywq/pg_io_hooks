@@ -1,8 +1,10 @@
 name: CI
 
-# Builds PostgreSQL 17 with the patch series from patches/ and runs all
-# tests: the PostgreSQL regression suite, the hooks test module, both
-# extensions and the test with the two extensions together.
+# Builds PostgreSQL 17, 18 and 19 with the patch series from patches/ and
+# runs all tests for each: the PostgreSQL regression suite, the hooks test
+# module, both extensions and the test with the two extensions together.
+# On 18 and 19 everything but the regression suite runs once for each
+# io_method (sync, worker, io_uring).
 
 on:
   push:
@@ -11,9 +13,19 @@ on:
 
 jobs:
   test:
-    name: Build and test (PostgreSQL 17 + hooks)
+    name: Build and test (PostgreSQL ${{ matrix.pg }} + hooks)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        pg: ['17', '18', '19']
+
+    env:
+      PG_VERSION: ${{ matrix.pg }}
+      # Fail instead of silently skipping io_method = io_uring.
+      LIBURING: ${{ matrix.pg == '17' && 'no' || 'yes' }}
 
     steps:
       - name: Check out the repository
@@ -32,7 +44,7 @@ jobs:
         if: failure()
         run: |
           mkdir -p ci-logs
-          find build/obj extensions tests \
+          find build extensions tests \
             \( -name regression.diffs -o -name regression.out \
                -o -path '*/tmp_check/log/*' -o -name make.log -o -name configure.log \) \
             -type f -print0 | xargs -0 -I{} cp --parents {} ci-logs/ || true
@@ -41,6 +53,6 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: logs
+          name: logs-pg${{ matrix.pg }}
           path: ci-logs
           if-no-files-found: ignore
