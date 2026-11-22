@@ -180,35 +180,49 @@ for round in $(seq 1 "$ROUNDS"); do
     done
 done
 
-# Summary: median tps per configuration and workload, and the difference to
-# vanilla.
+# Summary.  The speed of a machine drifts a little between rounds, which
+# affects all configurations of a round alike, so each configuration is
+# compared with vanilla of the same round; the table shows the median of
+# these per-round differences and their range, and the median tps.
 echo
 echo "PostgreSQL $(with_bin hooks pg_config --version | sed 's/PostgreSQL //'), scale $SCALE," \
      "shared_buffers $SHARED_BUFFERS, $CLIENTS clients, ${DURATION}s x $ROUNDS rounds"
+echo "Machine: $(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -n 1)," \
+     "$(nproc) CPUs, $(awk '/^MemTotal/ { printf "%.1f GB", $2 / 1048576 }' /proc/meminfo) RAM," \
+     "Linux $(uname -r)"
 echo
 awk -F, '
     NR > 1 {
-        v[$1 "," $2] = v[$1 "," $2] " " $4
+        tps[$1 "," $2 "," $3] = $4
+        if ($3 > rounds) rounds = $3
         if (cmin == "" || $5 < cmin) cmin = $5
         if ($5 > cmax) cmax = $5
     }
-    function median(s,    a, n, i, j, t) {
-        n = split(s, a, " ")
+    function median(a, n,    i, j, t) {
         for (i = 1; i <= n; i++)
             for (j = i + 1; j <= n; j++)
-                if (a[j] + 0 < a[i] + 0) { t = a[i]; a[i] = a[j]; a[j] = t }
+                if (a[j] < a[i]) { t = a[i]; a[i] = a[j]; a[j] = t }
         return (n % 2) ? a[(n + 1) / 2] : (a[n / 2] + a[n / 2 + 1]) / 2
     }
     END {
         split("vanilla hooks audit crypt", cfgs, " ")
         split("read-only read-write", wls, " ")
-        print "| Configuration | Workload | Median tps | vs. vanilla |"
-        print "|---------------|----------|-----------:|------------:|"
+        print "| Configuration | Workload | Median tps | vs. vanilla (median) | vs. vanilla (range) |"
+        print "|---------------|----------|-----------:|---------------------:|--------------------:|"
         for (w = 1; w <= 2; w++) {
-            base = median(v["vanilla," wls[w]])
             for (c = 1; c <= 4; c++) {
-                m = median(v[cfgs[c] "," wls[w]])
-                printf "| %s | %s | %.0f | %+.1f%% |\n", cfgs[c], wls[w], m, (m / base - 1) * 100
+                lo = ""; hi = ""
+                for (r = 1; r <= rounds; r++) {
+                    t[r] = tps[cfgs[c] "," wls[w] "," r]
+                    d[r] = (t[r] / tps["vanilla," wls[w] "," r] - 1) * 100
+                    if (lo == "" || d[r] < lo) lo = d[r]
+                    if (hi == "" || d[r] > hi) hi = d[r]
+                }
+                m = median(t, rounds)
+                if (cfgs[c] == "vanilla")
+                    printf "| %s | %s | %.0f | | |\n", cfgs[c], wls[w], m
+                else
+                    printf "| %s | %s | %.0f | %+.1f%% | %+.1f%% .. %+.1f%% |\n", cfgs[c], wls[w], m, median(d, rounds), lo, hi
             }
         }
         printf "\nCPU calibration: %d to %d ms", cmin, cmax

@@ -54,19 +54,6 @@ jobs:
       - name: Build PostgreSQL without the patches
         run: WORKDIR=build/19-vanilla APPLY_PATCHES=no scripts/build-postgres.sh
 
-      - name: Describe the machine
-        run: |
-          {
-            echo '### Machine'
-            echo
-            echo '```'
-            lscpu | grep -E '^(Model name|CPU\(s\)|Thread|Core)'
-            free -h | head -2
-            uname -r
-            echo '```'
-            echo
-          } >> "$GITHUB_STEP_SUMMARY"
-
       - name: Run the benchmark
         run: |
           scripts/bench.sh | tee bench.out
