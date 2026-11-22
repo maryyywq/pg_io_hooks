@@ -4,12 +4,20 @@ name: CI
 # runs all tests for each: the PostgreSQL regression suite, the hooks test
 # module, both extensions and the test with the two extensions together.
 # On 18 and 19 everything but the regression suite runs once for each
-# io_method (sync, worker, io_uring).
+# io_method (sync, worker, io_uring).  The code style is checked too.
 
 on:
+  # Branches other than main are tested through their pull requests, so
+  # that a push to such a branch does not run the same tests twice.
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
+
+# A newer push to the same branch or pull request cancels the older run.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -39,6 +47,11 @@ jobs:
 
       - name: Run the tests
         run: scripts/run-tests.sh
+
+      # Also after failed tests, so that one does not hide the other.
+      - name: Check the code style
+        if: ${{ !cancelled() }}
+        run: scripts/check-style.sh
 
       - name: Collect logs
         if: failure()
