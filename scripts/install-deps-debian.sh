@@ -26,4 +26,5 @@ $SUDO apt-get install -y --no-install-recommends \
     liburing-dev \
     perl \
     pkg-config \
+    shellcheck \
     zlib1g-dev

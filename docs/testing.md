@@ -25,6 +25,20 @@ adds to the configuration of every server a test creates.
 Most tests are TAP tests (Perl, `PostgreSQL::Test::Cluster`): each starts its
 own temporary servers, so they do not touch any running server.
 
+## Code style
+
+```
+scripts/check-style.sh                  # PostgreSQL 19
+PG_VERSION=17 scripts/check-style.sh    # or 18
+```
+
+checks that the core files changed by the patches are formatted with
+`pgindent` of that PostgreSQL version, that the C sources of the extensions
+are formatted with `pgindent` of PostgreSQL 19 (their own type names are in
+`extensions/typedefs.list`; versions of `pg_bsd_indent` differ in details, so
+one version is used for them), and runs `shellcheck` on the scripts. CI runs
+it for every version.
+
 ## What is tested
 
 | Step | Checks | What it shows |

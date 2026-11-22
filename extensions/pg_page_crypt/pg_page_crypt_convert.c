@@ -81,11 +81,11 @@ usage(void)
 		   "  -?, --help             show this help\n");
 }
 
-static void fatal(const char *fmt,...) __attribute__((format(printf, 1, 2), noreturn));
+static void fatal(const char *fmt, ...) __attribute__((format(printf, 1, 2), noreturn));
 
 /* Print an error message and exit with failure. */
 static void
-fatal(const char *fmt,...)
+fatal(const char *fmt, ...)
 {
 	va_list		ap;
 
