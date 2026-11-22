@@ -1,0 +1,237 @@
+From 129638d8925adb828386d98d4efab9b23364e27c Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:25:11 +0700
+Subject: [PATCH 4/6] test(smgr): cover notification hooks in test_smgr_hooks
+
+Add the test_smgr_hooks.log_events GUC, which logs relation-level smgr
+events of user relations, and a TAP test that checks every notification
+hook is called.
+---
+ src/test/modules/test_smgr_hooks/meson.build  |  1 +
+ .../modules/test_smgr_hooks/t/002_events.pl   | 72 ++++++++++++++
+ .../modules/test_smgr_hooks/test_smgr_hooks.c | 97 +++++++++++++++++++
+ 3 files changed, 170 insertions(+)
+ create mode 100644 src/test/modules/test_smgr_hooks/t/002_events.pl
+
+diff --git a/src/test/modules/test_smgr_hooks/meson.build b/src/test/modules/test_smgr_hooks/meson.build
+index 7256b7503a3..4804a0dbce1 100644
+--- a/src/test/modules/test_smgr_hooks/meson.build
++++ b/src/test/modules/test_smgr_hooks/meson.build
+@@ -23,6 +23,7 @@ tests += {
+   'tap': {
+     'tests': [
+       't/001_transform.pl',
++      't/002_events.pl',
+     ],
+   },
+ }
+diff --git a/src/test/modules/test_smgr_hooks/t/002_events.pl b/src/test/modules/test_smgr_hooks/t/002_events.pl
+new file mode 100644
+index 00000000000..18b3bad49b9
+--- /dev/null
++++ b/src/test/modules/test_smgr_hooks/t/002_events.pl
+@@ -0,0 +1,72 @@
++# Copyright (c) 2024, PostgreSQL Global Development Group
++
++# Test the smgr notification hooks (create, zeroextend, sync, truncate,
++# unlink) through the server log of test_smgr_hooks.
++
++use strict;
++use warnings FATAL => 'all';
++use PostgreSQL::Test::Cluster;
++use PostgreSQL::Test::Utils;
++use Test::More;
++
++# wal_level = minimal makes a new relation sync at commit instead of
++# WAL-logging it; a zero threshold forces that for tiny relations too.
++my $node = PostgreSQL::Test::Cluster->new('events');
++$node->init;
++$node->append_conf(
++	'postgresql.conf', qq{
++shared_preload_libraries = 'test_smgr_hooks'
++test_smgr_hooks.log_events = on
++wal_level = minimal
++max_wal_senders = 0
++wal_skip_threshold = 0
++});
++$node->start;
++
++sub filenode
++{
++	my ($rel) = @_;
++	return $node->safe_psql('postgres', "SELECT pg_relation_filenode('$rel')");
++}
++
++sub log_has
++{
++	my ($pattern) = @_;
++	return slurp_file($node->logfile) =~ $pattern;
++}
++
++# create + zeroextend
++$node->safe_psql('postgres', 'CREATE TABLE ev (id int)');
++my $ev = filenode('ev');
++ok(log_has(qr/test_smgr_hooks: create rel $ev fork 0 redo 0/),
++	'create hook is called');
++
++$node->safe_psql('postgres', 'INSERT INTO ev SELECT g FROM generate_series(1, 5000) g');
++ok(log_has(qr/test_smgr_hooks: zeroextend rel $ev fork 0 block 0 count \d+/),
++	'zeroextend hook is called');
++
++# immedsync at commit of a relation created in the same transaction
++$node->safe_psql('postgres', 'CREATE TABLE ev2 AS SELECT g FROM generate_series(1, 1000) g');
++my $ev2 = filenode('ev2');
++ok(log_has(qr/test_smgr_hooks: immedsync rel $ev2 fork 0/),
++	'sync hook is called for an immediate sync');
++
++# registersync from a bulk write that is not WAL-logged
++$node->safe_psql('postgres', 'CREATE INDEX ev_idx ON ev (id)');
++my $idx = filenode('ev_idx');
++ok(log_has(qr/test_smgr_hooks: registersync rel $idx fork 0/),
++	'sync hook is called for a registered sync');
++
++# truncate by vacuum
++$node->safe_psql('postgres', 'DELETE FROM ev');
++$node->safe_psql('postgres', 'VACUUM ev');
++ok(log_has(qr/test_smgr_hooks: truncate rel $ev fork 0 from \d+ to 0/),
++	'truncate hook is called');
++
++# unlink at commit of DROP
++$node->safe_psql('postgres', 'DROP TABLE ev2');
++ok(log_has(qr/test_smgr_hooks: unlink rel $ev2 redo 0/),
++	'unlink hook is called');
++
++$node->stop;
++done_testing();
+diff --git a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+index 1dac56147d7..8a19b421562 100644
+--- a/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
++++ b/src/test/modules/test_smgr_hooks/test_smgr_hooks.c
+@@ -25,6 +25,7 @@
+ #include "miscadmin.h"
+ #include "storage/bufmgr.h"
+ #include "storage/smgr.h"
++#include "utils/guc.h"
+ 
+ PG_MODULE_MAGIC;
+ 
+@@ -34,6 +35,14 @@ void		_PG_init(void);
+ static smgr_read_hook_type prev_read_hook = NULL;
+ static smgr_write_hook_type prev_write_hook = NULL;
+ static smgr_extend_hook_type prev_extend_hook = NULL;
++static smgr_zeroextend_hook_type prev_zeroextend_hook = NULL;
++static smgr_sync_hook_type prev_sync_hook = NULL;
++static smgr_truncate_hook_type prev_truncate_hook = NULL;
++static smgr_create_hook_type prev_create_hook = NULL;
++static smgr_unlink_hook_type prev_unlink_hook = NULL;
++
++/* GUC: report relation-level events of user relations in the server log */
++static bool log_events = false;
+ 
+ /*
+  * Output buffers of the write and extend hooks.  They are static, so that no
+@@ -138,6 +147,73 @@ test_extend_hook(SMgrRelation reln, ForkNumber forknum, BlockNumber blocknum,
+ 	return extend_block.data;
+ }
+ 
++static bool
++should_log(RelFileLocator rlocator)
++{
++	return log_events && rlocator.relNumber >= FirstNormalObjectId;
++}
++
++static void
++test_zeroextend_hook(SMgrRelation reln, ForkNumber forknum,
++					 BlockNumber blocknum, int nblocks)
++{
++	if (prev_zeroextend_hook)
++		prev_zeroextend_hook(reln, forknum, blocknum, nblocks);
++
++	if (should_log(reln->smgr_rlocator.locator))
++		elog(LOG, "test_smgr_hooks: zeroextend rel %u fork %d block %u count %d",
++			 reln->smgr_rlocator.locator.relNumber, forknum, blocknum, nblocks);
++}
++
++static void
++test_sync_hook(SMgrRelation reln, ForkNumber forknum, bool immediate)
++{
++	if (prev_sync_hook)
++		prev_sync_hook(reln, forknum, immediate);
++
++	if (should_log(reln->smgr_rlocator.locator))
++		elog(LOG, "test_smgr_hooks: %s rel %u fork %d",
++			 immediate ? "immedsync" : "registersync",
++			 reln->smgr_rlocator.locator.relNumber, forknum);
++}
++
++static void
++test_truncate_hook(SMgrRelation reln, ForkNumber forknum,
++				   BlockNumber old_nblocks, BlockNumber nblocks)
++{
++	if (prev_truncate_hook)
++		prev_truncate_hook(reln, forknum, old_nblocks, nblocks);
++
++	if (should_log(reln->smgr_rlocator.locator))
++		elog(LOG, "test_smgr_hooks: truncate rel %u fork %d from %u to %u",
++			 reln->smgr_rlocator.locator.relNumber, forknum,
++			 old_nblocks, nblocks);
++}
++
++static void
++test_create_hook(SMgrRelation reln, ForkNumber forknum, bool isRedo)
++{
++	if (prev_create_hook)
++		prev_create_hook(reln, forknum, isRedo);
++
++	if (should_log(reln->smgr_rlocator.locator))
++		elog(LOG, "test_smgr_hooks: create rel %u fork %d redo %d",
++			 reln->smgr_rlocator.locator.relNumber, forknum, isRedo);
++}
++
++static void
++test_unlink_hook(RelFileLocatorBackend rlocator, ForkNumber forknum,
++				 bool isRedo)
++{
++	if (prev_unlink_hook)
++		prev_unlink_hook(rlocator, forknum, isRedo);
++
++	/* Log only forks that exist, the hook is called for all fork numbers. */
++	if (should_log(rlocator.locator) && forknum == MAIN_FORKNUM)
++		elog(LOG, "test_smgr_hooks: unlink rel %u redo %d",
++			 rlocator.locator.relNumber, isRedo);
++}
++
+ void
+ _PG_init(void)
+ {
+@@ -149,6 +225,27 @@ _PG_init(void)
+ 		ereport(ERROR,
+ 				(errmsg("test_smgr_hooks must be loaded via shared_preload_libraries")));
+ 
++	DefineCustomBoolVariable("test_smgr_hooks.log_events",
++							 "Logs relation-level smgr events of user relations.",
++							 NULL,
++							 &log_events,
++							 false,
++							 PGC_SUSET,
++							 0,
++							 NULL, NULL, NULL);
++	MarkGUCPrefixReserved("test_smgr_hooks");
++
++	prev_zeroextend_hook = smgr_zeroextend_hook;
++	smgr_zeroextend_hook = test_zeroextend_hook;
++	prev_sync_hook = smgr_sync_hook;
++	smgr_sync_hook = test_sync_hook;
++	prev_truncate_hook = smgr_truncate_hook;
++	smgr_truncate_hook = test_truncate_hook;
++	prev_create_hook = smgr_create_hook;
++	smgr_create_hook = test_create_hook;
++	prev_unlink_hook = smgr_unlink_hook;
++	smgr_unlink_hook = test_unlink_hook;
++
+ 	prev_read_hook = smgr_read_hook;
+ 	smgr_read_hook = test_read_hook;
+ 	prev_write_hook = smgr_write_hook;
+-- 
+2.53.0
+

@@ -1,0 +1,31 @@
+From d3907d1c0ddf59f36fd6a76db48eeb2e3727f104 Mon Sep 17 00:00:00 2001
+From: Maria <mk902589@yandex.ru>
+Date: Fri, 13 Nov 2026 00:27:47 +0700
+Subject: [PATCH 5/6] chore: add smgr hook typedefs to typedefs.list
+
+---
+ src/tools/pgindent/typedefs.list | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/src/tools/pgindent/typedefs.list b/src/tools/pgindent/typedefs.list
+index 4b594388171..5f914397d70 100644
+--- a/src/tools/pgindent/typedefs.list
++++ b/src/tools/pgindent/typedefs.list
+@@ -4079,6 +4079,14 @@ slist_iter
+ slist_mutable_iter
+ slist_node
+ slock_t
++smgr_create_hook_type
++smgr_extend_hook_type
++smgr_read_hook_type
++smgr_sync_hook_type
++smgr_truncate_hook_type
++smgr_unlink_hook_type
++smgr_write_hook_type
++smgr_zeroextend_hook_type
+ socket_set
+ socklen_t
+ spgBulkDeleteState
+-- 
+2.53.0
+
