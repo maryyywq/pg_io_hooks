@@ -134,3 +134,8 @@ The hooks and both extensions are implemented and tested (see
 ## License
 
 [PostgreSQL License](LICENSE).
+
+The patches in [`patches/`](patches/) change PostgreSQL itself, so the code
+they modify remains under the license of PostgreSQL: Portions Copyright (c)
+1996-2026, PostgreSQL Global Development Group; Portions Copyright (c) 1994,
+The Regents of the University of California.
