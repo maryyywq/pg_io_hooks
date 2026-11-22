@@ -1,0 +1,42 @@
+name: Bug report
+description: Something in the hooks, the extensions, the scripts or the tests does not work as documented.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: How to reproduce
+      description: Commands or SQL, as small as possible.
+      render: shell
+    validations:
+      required: true
+  - type: dropdown
+    id: pg_version
+    attributes:
+      label: PostgreSQL version
+      options: ['17', '18', '19']
+    validations:
+      required: true
+  - type: dropdown
+    id: io_method
+    attributes:
+      label: io_method (PostgreSQL 18 and later)
+      options: [default, sync, worker, io_uring, not applicable]
+  - type: input
+    id: commit
+    attributes:
+      label: Commit of this repository
+      placeholder: output of git rev-parse --short HEAD
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Server log, regress_log_* or regression.diffs from tmp_check/.
+      render: text

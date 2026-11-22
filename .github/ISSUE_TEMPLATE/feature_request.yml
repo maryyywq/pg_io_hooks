@@ -1,0 +1,20 @@
+name: Feature request
+description: A new hook, a change to the hooks API, support for another version, or an improvement to the extensions.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: What it would make possible, and why the current hooks are not enough.
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: Which parts are affected (patches, extensions, scripts, CI, docs), and any risks you see.
