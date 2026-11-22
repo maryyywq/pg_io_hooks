@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 #
-# Build and install PostgreSQL 17 with the smgr hooks patch series applied.
+# Build and install PostgreSQL with the smgr hooks patch series applied.
 #
 # What it does:
-#   1. fetches the PostgreSQL commit that the patches are based on (named in
-#      patches/0001-*.patch as "base-commit:") into $WORKDIR/postgres,
+#   1. fetches the PostgreSQL commit that the patches for $PG_VERSION are
+#      based on (named in patches/$PG_VERSION/0001-*.patch as "base-commit:")
+#      into $WORKDIR/postgres,
 #   2. applies the patches with "git am",
 #   3. configures an out-of-tree build in $WORKDIR/obj,
 #   4. builds and installs into $PREFIX.
@@ -13,38 +14,51 @@
 # start from scratch, remove $WORKDIR.
 #
 # Environment variables (all optional):
-#   WORKDIR     where sources and build files go       (default: ./build)
+#   PG_VERSION  PostgreSQL major version: 17, 18 or 19 (default: 19)
+#   WORKDIR     where sources and build files go       (default: ./build/$PG_VERSION)
 #   PREFIX      installation directory                 (default: $WORKDIR/install)
 #   PG_REPO     where to fetch PostgreSQL from         (default: GitHub mirror)
 #   BUILD_TYPE  "debug" (assertions on, for testing) or "release"
 #               (optimized, for measurements)          (default: debug)
 #   JOBS        parallel build jobs                    (default: all CPUs)
+#   LIBURING    "auto", "yes" or "no": build with liburing, needed for
+#               io_method = io_uring (PostgreSQL 18 and later)
+#                                                      (default: auto, i.e.
+#                                                      if it is installed)
 #
 # Usage: scripts/build-postgres.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-WORKDIR="${WORKDIR:-$ROOT/build}"
+PG_VERSION="${PG_VERSION:-19}"
+WORKDIR="${WORKDIR:-$ROOT/build/$PG_VERSION}"
 PREFIX="${PREFIX:-$WORKDIR/install}"
 PG_REPO="${PG_REPO:-https://github.com/postgres/postgres.git}"
 BUILD_TYPE="${BUILD_TYPE:-debug}"
 JOBS="${JOBS:-$(nproc)}"
+LIBURING="${LIBURING:-auto}"
 
+PATCHES="$ROOT/patches/$PG_VERSION"
 SRC="$WORKDIR/postgres"
 OBJ="$WORKDIR/obj"
 
-# The commit the patches apply to, recorded by "git format-patch --base".
-BASE="$(sed -n 's/^base-commit: //p' "$ROOT"/patches/0001-*.patch | head -n 1)"
-if [ -z "$BASE" ]; then
-    echo "error: no base-commit found in patches/0001-*.patch" >&2
+if ! ls "$PATCHES"/0001-*.patch > /dev/null 2>&1; then
+    echo "error: no patches for PostgreSQL $PG_VERSION in $PATCHES" >&2
     exit 1
 fi
 
-echo "==> PostgreSQL base commit: $BASE"
+# The commit the patches apply to, recorded by "git format-patch --base".
+BASE="$(sed -n 's/^base-commit: //p' "$PATCHES"/0001-*.patch | head -n 1)"
+if [ -z "$BASE" ]; then
+    echo "error: no base-commit found in $PATCHES/0001-*.patch" >&2
+    exit 1
+fi
+
+echo "==> PostgreSQL $PG_VERSION, base commit: $BASE"
 
 # A checksum of the patch files, stored in the source tree after they are
 # applied, so that a later run notices when the patches have changed.
-PATCHES_SUM="$(cat "$ROOT"/patches/*.patch | sha256sum | cut -d' ' -f1)"
+PATCHES_SUM="$(cat "$PATCHES"/*.patch | sha256sum | cut -d' ' -f1)"
 STAMP="$SRC/.pg_io_hooks-patches.sha256"
 
 if [ ! -d "$SRC/.git" ]; then
@@ -59,7 +73,7 @@ if [ ! -d "$SRC/.git" ]; then
     # "git am" needs an identity for the commits it creates in this
     # throw-away source tree; the patches keep their own authors.
     git -C "$SRC" -c user.name="pg_io_hooks build" -c user.email="build@localhost" \
-        am --quiet "$ROOT"/patches/*.patch
+        am --quiet "$PATCHES"/*.patch
     echo "$PATCHES_SUM" > "$STAMP"
 else
     echo "==> Reusing the source tree in $SRC"
@@ -85,6 +99,28 @@ case "$BUILD_TYPE" in
         ;;
 esac
 
+# io_method = io_uring (PostgreSQL 18 and later) needs liburing.
+if [ "$PG_VERSION" -ge 18 ]; then
+    case "$LIBURING" in
+        auto)
+            if pkg-config --exists liburing 2> /dev/null; then
+                CONFIGURE_FLAGS+=(--with-liburing)
+            else
+                echo "==> liburing not found, building without io_method = io_uring"
+            fi
+            ;;
+        yes)
+            CONFIGURE_FLAGS+=(--with-liburing)
+            ;;
+        no)
+            ;;
+        *)
+            echo "error: LIBURING must be 'auto', 'yes' or 'no'" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 echo "==> Configuring ($BUILD_TYPE build) in $OBJ"
 mkdir -p "$OBJ"
 (
@@ -107,4 +143,4 @@ make -C "$OBJ" install > "$OBJ/install.log"
 echo
 echo "Done. PostgreSQL is installed in $PREFIX"
 echo "  export PATH=\"$PREFIX/bin:\$PATH\""
-echo "Run the tests with scripts/run-tests.sh (use the same WORKDIR and PREFIX)."
+echo "Run the tests with scripts/run-tests.sh (use the same PG_VERSION, WORKDIR and PREFIX)."
