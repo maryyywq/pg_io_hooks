@@ -38,6 +38,11 @@ BUILD_TYPE="${BUILD_TYPE:-debug}"
 JOBS="${JOBS:-$(nproc)}"
 LIBURING="${LIBURING:-auto}"
 
+# The build changes directories, so relative paths would break.
+mkdir -p "$WORKDIR" "$PREFIX"
+WORKDIR="$(cd "$WORKDIR" && pwd)"
+PREFIX="$(cd "$PREFIX" && pwd)"
+
 PATCHES="$ROOT/patches/$PG_VERSION"
 SRC="$WORKDIR/postgres"
 OBJ="$WORKDIR/obj"
