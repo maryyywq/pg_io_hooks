@@ -58,6 +58,19 @@
 
 #include "page_cipher.h"
 
+/*
+ * Fail early, with a clear message, when built against a server without the
+ * smgr hooks (see patches/), instead of with errors about unknown types.
+ */
+#if PG_VERSION_NUM < 170000
+#error "pg_page_crypt requires PostgreSQL 17 or later"
+#endif
+#if !defined(SMGR_HOOKS_API_VERSION)
+#error "pg_page_crypt requires a PostgreSQL server built with the smgr hooks patches from patches/<version>/"
+#elif SMGR_HOOKS_API_VERSION != 2
+#error "pg_page_crypt requires version 2 of the smgr hooks API; use the patches from this repository"
+#endif
+
 PG_MODULE_MAGIC;
 
 void		_PG_init(void);
