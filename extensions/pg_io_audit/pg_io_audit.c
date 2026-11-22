@@ -44,6 +44,19 @@
 #include "utils/timestamp.h"
 #include "utils/tuplestore.h"
 
+/*
+ * Fail early, with a clear message, when built against a server without the
+ * smgr hooks (see patches/), instead of with errors about unknown types.
+ */
+#if PG_VERSION_NUM < 170000
+#error "pg_io_audit requires PostgreSQL 17 or later"
+#endif
+#if !defined(SMGR_HOOKS_API_VERSION)
+#error "pg_io_audit requires a PostgreSQL server built with the smgr hooks patches from patches/<version>/"
+#elif SMGR_HOOKS_API_VERSION != 2
+#error "pg_io_audit requires version 2 of the smgr hooks API; use the patches from this repository"
+#endif
+
 PG_MODULE_MAGIC;
 
 /* SQL-callable functions, see pg_io_audit--1.0.sql */

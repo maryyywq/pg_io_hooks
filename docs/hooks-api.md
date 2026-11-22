@@ -10,6 +10,18 @@ The API is the same for PostgreSQL 17, 18 and 19, so an extension builds for
 all three from one source. Where the versions differ in how a hook is
 called, this page says so.
 
+`smgr.h` defines `SMGR_HOOKS_API_VERSION` (currently `2`), so an extension
+can refuse to build against a server without the patches with a clear
+message:
+
+```c
+#include "storage/smgr.h"
+
+#if !defined(SMGR_HOOKS_API_VERSION) || SMGR_HOOKS_API_VERSION != 2
+#error "this extension needs a server with the smgr hooks (API version 2)"
+#endif
+```
+
 ## Overview
 
 Hooks come in two kinds.
