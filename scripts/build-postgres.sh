@@ -21,6 +21,9 @@
 #   BUILD_TYPE  "debug" (assertions on, for testing) or "release"
 #               (optimized, for measurements)          (default: debug)
 #   JOBS        parallel build jobs                    (default: all CPUs)
+#   APPLY_PATCHES  "yes" or "no": "no" builds the same base commit without
+#               the patches, for comparisons (see scripts/bench.sh)
+#                                                      (default: yes)
 #   LIBURING    "auto", "yes" or "no": build with liburing, needed for
 #               io_method = io_uring (PostgreSQL 18 and later)
 #                                                      (default: auto, i.e.
@@ -37,6 +40,7 @@ PG_REPO="${PG_REPO:-https://github.com/postgres/postgres.git}"
 BUILD_TYPE="${BUILD_TYPE:-debug}"
 JOBS="${JOBS:-$(nproc)}"
 LIBURING="${LIBURING:-auto}"
+APPLY_PATCHES="${APPLY_PATCHES:-yes}"
 
 # The build changes directories, so relative paths would break.
 mkdir -p "$WORKDIR" "$PREFIX"
@@ -63,7 +67,14 @@ echo "==> PostgreSQL $PG_VERSION, base commit: $BASE"
 
 # A checksum of the patch files, stored in the source tree after they are
 # applied, so that a later run notices when the patches have changed.
-PATCHES_SUM="$(cat "$PATCHES"/*.patch | sha256sum | cut -d' ' -f1)"
+case "$APPLY_PATCHES" in
+    yes) PATCHES_SUM="$(cat "$PATCHES"/*.patch | sha256sum | cut -d' ' -f1)" ;;
+    no)  PATCHES_SUM="none" ;;
+    *)
+        echo "error: APPLY_PATCHES must be 'yes' or 'no'" >&2
+        exit 1
+        ;;
+esac
 STAMP="$SRC/.pg_io_hooks-patches.sha256"
 
 if [ ! -d "$SRC/.git" ]; then
@@ -74,16 +85,21 @@ if [ ! -d "$SRC/.git" ]; then
     git -C "$SRC" fetch --quiet --depth 1 origin "$BASE"
     git -C "$SRC" checkout --quiet --detach FETCH_HEAD
 
-    echo "==> Applying patches"
-    # "git am" needs an identity for the commits it creates in this
-    # throw-away source tree; the patches keep their own authors.
-    git -C "$SRC" -c user.name="pg_io_hooks build" -c user.email="build@localhost" \
-        am --quiet "$PATCHES"/*.patch
+    if [ "$APPLY_PATCHES" = yes ]; then
+        echo "==> Applying patches"
+        # "git am" needs an identity for the commits it creates in this
+        # throw-away source tree; the patches keep their own authors.
+        git -C "$SRC" -c user.name="pg_io_hooks build" -c user.email="build@localhost" \
+            am --quiet "$PATCHES"/*.patch
+    else
+        echo "==> Not applying the patches (APPLY_PATCHES=no)"
+    fi
     echo "$PATCHES_SUM" > "$STAMP"
 else
     echo "==> Reusing the source tree in $SRC"
     if [ ! -f "$STAMP" ] || [ "$(cat "$STAMP")" != "$PATCHES_SUM" ]; then
-        echo "error: the source tree in $SRC was not prepared from the current patches;" >&2
+        echo "error: the source tree in $SRC was not prepared from the current patches" >&2
+        echo "       (or with another APPLY_PATCHES setting);" >&2
         echo "       remove $WORKDIR and run this script again" >&2
         exit 1
     fi
