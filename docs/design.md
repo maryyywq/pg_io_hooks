@@ -184,6 +184,55 @@ blocks are never transformed.
   stays plaintext, which is stated as a limitation of `pg_page_crypt`.
 - **No per-relation or per-tablespace selection**, and no changes of block
   size. Both would be extensions of this work.
+- **No SGML documentation in the patches.** PostgreSQL does not document its
+  hooks in its manual: `planner_hook`, `ExecutorStart_hook`,
+  `ProcessUtility_hook`, `object_access_hook` and the others are described
+  by comments in their header files and shown by modules in
+  `src/test/modules`. Only `shmem_request_hook` is described there, as part
+  of the shared memory API for extensions (`emit_log_hook` appears once, as
+  an example of coding style). The patches follow the same practice:
+  the contract of each hook is in `smgr.h`, the test module
+  `test_smgr_hooks` shows the use, and [hooks-api.md](hooks-api.md) is the
+  full reference.
+
+## Compression, and why the hooks do not support it
+
+Compression is a natural use of hooks that change blocks on their way to the
+files, but the hooks cannot save disk space with it, and this is a
+consequence of their design rather than an oversight.
+
+**Blocks keep their size and place.** `md.c` finds block *n* of a relation
+at offset *n* × `BLCKSZ` of the file (within its 1 GB segment), and every
+read and write moves whole blocks. A transforming hook may change the
+contents of a block but not its length, so a page compressed from 8 kB to
+2 kB would still be written as 8 kB: the compressed data followed by zeros.
+
+**The ways around this do not work with the hooks alone:**
+
+- *Punching holes.* The zero tail could be released with
+  `fallocate(FALLOC_FL_PUNCH_HOLE)`, leaving sparse files. But `md.c` writes
+  the block after the write hook returns, and there is no hook after the
+  write; doing it in the core would also fragment the files.
+- *Compression in the file system* (btrfs, ZFS) would store the zero tail in
+  almost no space. It already compresses ordinary PostgreSQL pages by itself,
+  though, so compressing in the extension gains little.
+- *Real compression* needs blocks of variable size and a map from block
+  numbers to positions in the file, with space reuse when a block grows or
+  shrinks. Postgres Pro implements this in its CFS (compressed file system)
+  inside its storage layer. With the hooks, the write hook would have to
+  return data of any length and the read path would have to look up where a
+  block is and how long it is before reading it, which replaces `md.c`
+  rather than transforming its data. That is the direction of the
+  extensible storage manager proposals (see [Related work](#related-work)),
+  not of hooks in the `smgr.c` wrappers.
+
+**Encryption and file system compression exclude each other.** Encrypted
+blocks look random, so a file system cannot compress the files of
+`pg_page_crypt`. A single transforming extension that compresses each block
+and then encrypts it, leaving the zero tail unencrypted, would let file
+system compression work again, within the current hooks. It would however
+reveal the compressed size of each block, which tells something about its
+contents; that trade-off is why it was not done here.
 
 ## How `pg_page_crypt` handles the direct users
 
