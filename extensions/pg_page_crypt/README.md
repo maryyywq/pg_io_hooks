@@ -64,6 +64,39 @@ To go back, stop the cluster cleanly, remove the module from
 The tool needs `pg_controldata` in `PATH`, and refuses to run if the server
 is running or was not shut down cleanly.
 
+## Example
+
+A table in a cluster without the extension is stored as plaintext:
+
+```
+$ psql -c "CREATE TABLE secrets (v text);
+           INSERT INTO secrets VALUES ('card 4111-1111-1111-1111'); CHECKPOINT;"
+$ psql -At -c "SELECT pg_relation_filepath('secrets')"
+base/5/16384
+$ grep -a -c 'card 4111' $PGDATA/base/5/16384
+1
+```
+
+After the conversion the file no longer contains the text, while queries
+return it as before, and new data is written encrypted too:
+
+```
+$ pg_ctl stop
+$ pg_page_crypt_convert --encrypt -D $PGDATA --key-file /path/to/pg_page_crypt.key
+pg_page_crypt_convert: 3 files, 2 blocks encrypted
+$ grep -a -c 'card 4111' $PGDATA/base/5/16384
+0
+$ pg_ctl start      # with the module configured, see Setup
+$ psql -c "SELECT * FROM secrets"
+            v
+--------------------------
+ card 4111-1111-1111-1111
+(1 row)
+$ psql -c "INSERT INTO secrets VALUES ('card 5500-0000-0000-0004'); CHECKPOINT;"
+$ grep -a -c 'card 5500' $PGDATA/base/5/16384
+0
+```
+
 ## What is encrypted
 
 - All forks of relations with a file number of 16384 or more: user tables,
