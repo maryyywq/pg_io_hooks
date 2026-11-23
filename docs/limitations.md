@@ -29,7 +29,8 @@ noted, deliberate.
   ([design.md](design.md#one-transformer-any-number-of-observers)). Nothing
   in the server enforces this.
 - **Size-preserving transformations only.** A transformed block must have the
-  size of the original.
+  size of the original, so compression cannot save disk space (see
+  [design.md](design.md#compression-and-why-the-hooks-do-not-support-it)).
 - **Cluster-wide.** No selection per relation or tablespace.
 - **No WAL hooks.**
 - **Performance was measured only for PostgreSQL 19,** with the default
