@@ -198,6 +198,9 @@ number, deliberately without the fork, database or tablespace:
   manager into a different database, so the database must not be part of the
   tweak.
 
+The same choice lets `pg_rewind` and `pg_upgrade` work unchanged: both copy
+relation files or blocks as they are, and keep the file and block numbers.
+
 Encryption needs the data checksum as its only integrity check (XTS does not
 authenticate), so the extension refuses to start without data checksums.
 A cluster is encrypted once, while stopped, by a conversion tool, which

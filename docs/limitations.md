@@ -77,7 +77,9 @@ noted, deliberate.
 |------|--------|
 | `pg_basebackup` | works; the copy needs the same module and key to start. It cannot verify encrypted pages (their headers are encrypted) and does not report errors for them |
 | `pg_checksums --check` | reports every encrypted block as a bad checksum; do not use |
-| `pg_rewind`, `pg_upgrade`, `pg_combinebackup` | not tested |
+| `pg_rewind` | works; the rewound server needs the same module and key (tested from a data directory and from a running server) |
+| `pg_upgrade` | works from 17 and 18 to 19 (tested with the default `--copy`). Before the upgrade, create the new cluster with data checksums, convert it with `pg_page_crypt_convert` and the same key while it is empty, and configure the module; the old cluster's files are then copied as they are |
+| `pg_combinebackup` | not tested |
 
 ## `pg_io_audit`
 

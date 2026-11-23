@@ -103,7 +103,13 @@ is running or was not shut down cleanly.
   - `pg_basebackup` works and its copy contains the state file, so a standby
     or restored copy needs the same module and key. It does not report
     errors for encrypted pages, but it cannot verify them either.
-  - `pg_rewind` was not tested.
+  - `pg_rewind` works: it copies blocks of the same relation files and
+    block numbers, which the same key decrypts. The rewound server needs
+    the same module and key, as a standby does.
+  - `pg_upgrade` (tested from 17 and 18 to 19) works when the new cluster
+    is converted with the same key before the upgrade: it keeps the file
+    numbers of user relations and copies their files as they are. See
+    [docs/limitations.md](../../docs/limitations.md#behavior-of-postgresql-tools-with-an-encrypted-cluster).
 - **Key handling is minimal:** a key file, no rotation. A standby needs the
   same key and the same configuration.
 
@@ -121,4 +127,11 @@ runs the TAP tests against the installed server and module:
 - `t/002_replication.pl`: base backup, standby, promotion;
 - `t/003_tool.pl`: the conversion tool with tablespaces, with shared catalogs
   rewritten before the conversion, with a data directory path that contains
-  a quote, and moving encrypted data between tablespaces.
+  a quote, and moving encrypted data between tablespaces;
+- `t/004_rewind.pl`: `pg_rewind` of a failed-over primary, from the data
+  directory and from a running server of the new primary;
+- `t/005_crash_under_load.pl`: crashes during a `pgbench` write workload,
+  checked with the `pgbench` balances and `amcheck`.
+
+The upgrade test is in [`tests/upgrade`](../../tests/upgrade), because it
+needs two PostgreSQL versions.
