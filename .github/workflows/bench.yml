@@ -3,9 +3,9 @@ name: Benchmark
 # Measures the overhead of the hooks and of the extensions with pgbench (see
 # scripts/bench.sh and docs/performance.md): release builds of PostgreSQL 19
 # with and without the patches, four configurations, read-only and
-# read-write.  Runs on demand, and on pull requests that change the
-# benchmark itself.  The results are in the job summary and in the
-# "bench-results" artifact.
+# read-write.  Runs on demand only (Actions tab, "Run workflow"): it takes
+# about an hour, too long to run on every push to a pull request.  The
+# results are in the job summary and in the "bench-results" artifact.
 
 on:
   workflow_dispatch:
@@ -19,13 +19,9 @@ on:
       rounds:
         description: number of rounds
         default: '5'
-  pull_request:
-    paths:
-      - scripts/bench.sh
-      - .github/workflows/bench.yml
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
