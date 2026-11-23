@@ -14,3 +14,12 @@ TAP_TESTS = 1
 PG_CONFIG ?= pg_config
 PGXS := $(shell $(PG_CONFIG) --pgxs)
 include $(PGXS)
+
+# Fail early with a clear message if the OpenSSL headers are missing, instead
+# of a compiler error in the middle of the build.  Not for "make clean".
+ifeq ($(filter clean distclean,$(MAKECMDGOALS)),)
+hash := \#
+ifneq ($(shell echo '$(hash)include <openssl/evp.h>' | $(CC) $(CPPFLAGS) -E - > /dev/null 2>&1 && echo yes),yes)
+$(error pg_page_crypt needs the OpenSSL development files (openssl/evp.h, libcrypto); install libssl-dev on Debian or Ubuntu, openssl-devel on Fedora or RHEL)
+endif
+endif

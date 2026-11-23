@@ -15,7 +15,10 @@ not meant for production use.
 
 - PostgreSQL 17, 18 or 19 with the matching patch series from
   `../../patches/` applied
-- OpenSSL development files
+- OpenSSL development files (`libssl-dev` on Debian and Ubuntu); the
+  `Makefile` stops with a message if they are missing. The server itself
+  does not need to be built with OpenSSL, and `pg_io_audit` does not need it
+  at all.
 - Data checksums enabled in the cluster (the default of `initdb` since
   PostgreSQL 18; use `initdb --data-checksums` on 17)
 
