@@ -5,6 +5,8 @@ name: CI
 # module, both extensions and the test with the two extensions together.
 # On 18 and 19 everything but the regression suite runs once for each
 # io_method (sync, worker, io_uring).  The code style is checked too.
+# A separate job tests pg_upgrade of an encrypted cluster from 17 and 18
+# to 19.
 
 on:
   # Branches other than main are tested through their pull requests, so
@@ -67,5 +69,48 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-pg${{ matrix.pg }}
+          path: ci-logs
+          if-no-files-found: ignore
+
+  upgrade:
+    name: pg_upgrade (PostgreSQL ${{ matrix.old }} to 19)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    strategy:
+      fail-fast: false
+      matrix:
+        old: ['17', '18']
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: scripts/install-deps-debian.sh
+
+      - name: Build PostgreSQL ${{ matrix.old }} with the patches
+        run: PG_VERSION=${{ matrix.old }} scripts/build-postgres.sh
+
+      - name: Build PostgreSQL 19 with the patches
+        run: PG_VERSION=19 scripts/build-postgres.sh
+
+      - name: Run the upgrade test
+        run: OLD_VERSION=${{ matrix.old }} NEW_VERSION=19 scripts/run-upgrade-test.sh
+
+      - name: Collect logs
+        if: failure()
+        run: |
+          mkdir -p ci-logs
+          find build tests \
+            \( -path '*/tmp_check/log/*' -o -name make.log -o -name configure.log \
+               -o -name '*.txt' -path '*pg_upgrade_output.d*' \) \
+            -type f -print0 | xargs -0 -I{} cp --parents {} ci-logs/ || true
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-upgrade-pg${{ matrix.old }}
           path: ci-logs
           if-no-files-found: ignore
