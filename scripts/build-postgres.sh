@@ -8,7 +8,8 @@
 #      into $WORKDIR/postgres,
 #   2. applies the patches with "git am",
 #   3. configures an out-of-tree build in $WORKDIR/obj,
-#   4. builds and installs into $PREFIX.
+#   4. builds and installs into $PREFIX, together with contrib/amcheck,
+#      which the tests use to check the structure of pages.
 #
 # It is safe to run again: an already prepared source tree is reused.  To
 # start from scratch, remove $WORKDIR.
@@ -160,6 +161,7 @@ make -C "$OBJ" -j "$JOBS" > "$OBJ/make.log"
 
 echo "==> Installing into $PREFIX"
 make -C "$OBJ" install > "$OBJ/install.log"
+make -C "$OBJ/contrib/amcheck" -j "$JOBS" install >> "$OBJ/install.log"
 
 echo
 echo "Done. PostgreSQL is installed in $PREFIX"
